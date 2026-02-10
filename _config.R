@@ -22,6 +22,9 @@ R_EXE <- "C:/Program Files/R/R-4.4.1/bin/Rscript.exe"
 # Python executable (for reticulate)
 PYTHON_EXE <- "C:/Users/ammonsj/AppData/Local/Programs/Python/Python313/python.exe"
 
+# Pandoc (bundled with RStudio)
+Sys.setenv(RSTUDIO_PANDOC = "C:/Program Files/RStudio/resources/app/bin/quarto/bin/tools")
+
 # Ensure directories exist
 for (d in c(DATA_RAW, DATA_PARQUET, DATA_PANELS, MODELS_DIR,
             FIGURES_DIR, TABLES_DIR, OUTPUT_HTML, OUTPUT_LOGS,
