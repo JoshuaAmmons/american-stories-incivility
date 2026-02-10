@@ -1,0 +1,239 @@
+---
+title: "07 — DiD Estimation via fect"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Load panel
+
+```{r load}
+library(arrow)
+library(data.table)
+library(fect)
+library(panelView)
+library(ggplot2)
+
+panel <- as.data.table(read_parquet(
+  file.path(DATA_PANELS, "did_panel.parquet")
+))
+
+message("Panel: ", nrow(panel), " rows, ",
+        uniqueN(panel$newspaper_id), " newspapers, ",
+        uniqueN(panel$time_id), " time periods")
+message("Treated newspaper-months: ", sum(panel$treated))
+message("Control newspaper-months: ", sum(panel$treated == 0))
+```
+
+## Visualize treatment pattern
+
+```{r panelview, fig.width=10, fig.height=8}
+# panelView expects a formula: Y ~ D
+# Use a subset for visualization if panel is very large
+set.seed(SEED)
+if (uniqueN(panel$newspaper_id) > 200) {
+  # Sample 100 treated + 100 control newspapers
+  treated_nps <- unique(panel[treated == 1, newspaper_id])
+  control_nps <- unique(panel[treated == 0 & !(newspaper_id %in% treated_nps), newspaper_id])
+
+  sample_nps <- c(
+    sample(treated_nps, min(100, length(treated_nps))),
+    sample(control_nps, min(100, length(control_nps)))
+  )
+  panel_viz <- panel[newspaper_id %in% sample_nps]
+} else {
+  panel_viz <- panel
+}
+
+panelview(incivil_rate_rf ~ treated,
+          data = as.data.frame(panel_viz),
+          index = c("newspaper_id", "time_id"),
+          type = "treat",
+          main = "Treatment Status: Coughlin Exposure Across Newspapers")
+```
+
+## Model 1: Interactive Fixed Effects (IFEct) — Primary
+
+```{r ife}
+message("\n=== Interactive Fixed Effects (IFE) ===")
+
+out_ife <- fect(
+  incivil_rate_rf ~ treated,
+  data = as.data.frame(panel),
+  index = c("newspaper_id", "time_id"),
+  method = "ife",
+  force = "two-way",
+  se = TRUE,
+  vartype = "bootstrap",
+  nboots = 200,
+  parallel = TRUE,
+  cores = max(1, parallel::detectCores() - 1),
+  seed = SEED
+)
+
+print(out_ife)
+
+# Save model
+saveRDS(out_ife, file.path(MODELS_DIR, "fect_ife.rds"))
+```
+
+## Model 2: Matrix Completion
+
+```{r mc}
+message("\n=== Matrix Completion ===")
+
+out_mc <- fect(
+  incivil_rate_rf ~ treated,
+  data = as.data.frame(panel),
+  index = c("newspaper_id", "time_id"),
+  method = "mc",
+  se = TRUE,
+  vartype = "bootstrap",
+  nboots = 200,
+  parallel = TRUE,
+  cores = max(1, parallel::detectCores() - 1),
+  seed = SEED
+)
+
+print(out_mc)
+saveRDS(out_mc, file.path(MODELS_DIR, "fect_mc.rds"))
+```
+
+## Model 3: Two-Way Fixed Effects (benchmark)
+
+```{r fe}
+message("\n=== Two-Way Fixed Effects ===")
+
+out_fe <- fect(
+  incivil_rate_rf ~ treated,
+  data = as.data.frame(panel),
+  index = c("newspaper_id", "time_id"),
+  method = "fe",
+  force = "two-way",
+  se = TRUE,
+  vartype = "bootstrap",
+  nboots = 200,
+  parallel = TRUE,
+  cores = max(1, parallel::detectCores() - 1),
+  seed = SEED
+)
+
+print(out_fe)
+saveRDS(out_fe, file.path(MODELS_DIR, "fect_fe.rds"))
+```
+
+## Model 4: Placebo (pre-trend) test
+
+```{r placebo}
+message("\n=== Placebo Test ===")
+
+out_placebo <- fect(
+  incivil_rate_rf ~ treated,
+  data = as.data.frame(panel),
+  index = c("newspaper_id", "time_id"),
+  method = "ife",
+  force = "two-way",
+  se = TRUE,
+  vartype = "bootstrap",
+  nboots = 200,
+  parallel = TRUE,
+  cores = max(1, parallel::detectCores() - 1),
+  seed = SEED,
+  placeboTest = TRUE,
+  placebo.period = c(-6, -1)
+)
+
+print(out_placebo)
+saveRDS(out_placebo, file.path(MODELS_DIR, "fect_placebo.rds"))
+```
+
+## Model 5: Carryover test (equilibrium shift / persistence)
+
+```{r carryover}
+message("\n=== Carryover Test (Persistence) ===")
+
+out_carry <- fect(
+  incivil_rate_rf ~ treated,
+  data = as.data.frame(panel),
+  index = c("newspaper_id", "time_id"),
+  method = "ife",
+  force = "two-way",
+  se = TRUE,
+  vartype = "bootstrap",
+  nboots = 200,
+  parallel = TRUE,
+  cores = max(1, parallel::detectCores() - 1),
+  seed = SEED,
+  carryoverTest = TRUE,
+  carryover.period = c(1, 12)
+)
+
+print(out_carry)
+saveRDS(out_carry, file.path(MODELS_DIR, "fect_carryover.rds"))
+```
+
+## Robustness: Lexicon-based outcome
+
+```{r robustness-lexicon}
+message("\n=== Robustness: Lexicon-based outcome ===")
+
+out_ife_lex <- fect(
+  incivil_rate_lexicon ~ treated,
+  data = as.data.frame(panel),
+  index = c("newspaper_id", "time_id"),
+  method = "ife",
+  force = "two-way",
+  se = TRUE,
+  vartype = "bootstrap",
+  nboots = 200,
+  parallel = TRUE,
+  cores = max(1, parallel::detectCores() - 1),
+  seed = SEED
+)
+
+print(out_ife_lex)
+saveRDS(out_ife_lex, file.path(MODELS_DIR, "fect_ife_lexicon.rds"))
+```
+
+## Results summary
+
+```{r results-summary}
+# Extract ATT estimates
+extract_att <- function(model, label) {
+  att <- model$att.avg
+  se <- model$att.avg.se
+  data.table(
+    Model = label,
+    ATT = round(att, 4),
+    SE = round(se, 4),
+    CI_lower = round(att - 1.96 * se, 4),
+    CI_upper = round(att + 1.96 * se, 4),
+    p_value = round(2 * pnorm(-abs(att / se)), 4)
+  )
+}
+
+results <- rbindlist(list(
+  extract_att(out_ife, "IFE (primary)"),
+  extract_att(out_mc, "Matrix Completion"),
+  extract_att(out_fe, "Two-Way FE"),
+  extract_att(out_ife_lex, "IFE (lexicon outcome)")
+))
+
+print(results)
+
+# Save results table
+tex <- knitr::kable(results, format = "latex", booktabs = TRUE,
+                    caption = "Average Treatment Effect on the Treated (ATT) Estimates",
+                    col.names = c("Model", "ATT", "SE", "CI Lower", "CI Upper", "p-value"))
+save_table <- function(tex_string, filename) {
+  for (dir in c(TABLES_DIR, OVERLEAF_TABLES)) {
+    writeLines(tex_string, file.path(dir, paste0(filename, ".tex")))
+  }
+}
+save_table(tex, "main_results")
+message("Saved main results table.")
+```

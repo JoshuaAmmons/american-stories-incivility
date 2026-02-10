@@ -1,0 +1,158 @@
+---
+title: "04 — Feature Engineering for Random Forest"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+source("C:/Users/ammonsj/Ideas/R/helpers.R")
+```
+
+## Load scored articles
+
+We build features on a training sample (manageable size), then score
+the full corpus in the next step.
+
+```{r load-data}
+library(arrow)
+library(data.table)
+library(dplyr)
+
+scored_dir <- file.path(DATA_PARQUET, "articles_scored")
+scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRUE)
+
+# For feature engineering + RF training, sample articles
+# Use stratified sample: ~500K articles across all decades
+set.seed(SEED)
+
+all_articles <- open_dataset(scored_files)
+total_n <- all_articles |> count() |> collect() |> pull(n)
+message("Total scored articles: ", total_n)
+
+# Sample rate to get ~500K articles
+sample_rate <- min(1.0, 500000 / total_n)
+message("Sampling at rate: ", round(sample_rate, 4))
+
+# Read sample
+sample_df <- all_articles |>
+  collect()
+
+# Take a random sample if dataset is large
+if (nrow(sample_df) > 500000) {
+  idx <- sample(nrow(sample_df), 500000)
+  sample_df <- sample_df[idx, ]
+}
+
+dt <- as.data.table(sample_df)
+rm(sample_df)
+gc()
+
+message("Working with ", nrow(dt), " articles for feature engineering")
+```
+
+## Build text features (TF-IDF -> SVD)
+
+```{r text-features}
+library(quanteda)
+library(irlba)
+
+# Create corpus from article text
+corp <- corpus(dt$article)
+
+# Tokenize
+toks <- tokens(corp, remove_punct = TRUE, remove_numbers = TRUE,
+               remove_symbols = TRUE) |>
+  tokens_tolower() |>
+  tokens_remove(stopwords("en")) |>
+  tokens_wordstem()
+
+# Document-feature matrix
+dfmat <- dfm(toks)
+
+# Trim to top 10,000 features
+dfmat <- dfm_trim(dfmat, min_termfreq = 50, min_docfreq = 20)
+dfmat <- dfm_select(dfmat, names(topfeatures(dfmat, 10000)))
+message("DFM dimensions: ", nrow(dfmat), " x ", ncol(dfmat))
+
+# TF-IDF weighting
+dfmat_tfidf <- dfm_tfidf(dfmat)
+
+# Convert to matrix for SVD
+mat <- as.matrix(dfmat_tfidf)
+
+# SVD to 200 components (reduced from 300 for memory)
+message("Running SVD...")
+n_components <- min(200, ncol(mat) - 1)
+svd_result <- prcomp_irlba(mat, n = n_components, center = TRUE, scale. = FALSE)
+
+svd_df <- as.data.table(svd_result$x)
+names(svd_df) <- paste0("svd_", seq_len(ncol(svd_df)))
+message("SVD components: ", ncol(svd_df))
+
+# Clean up large objects
+rm(corp, toks, dfmat, dfmat_tfidf, mat, svd_result)
+gc()
+```
+
+## Combine text features with metadata features
+
+```{r combine-features}
+# Metadata features
+meta_features <- dt[, .(
+  front_page,
+  headline_length,
+  n_words,
+  has_byline,
+  ocr_quality,
+  page_num,
+  # Subcategory scores as additional features
+  insult_score,
+  dehumanize_score,
+  violence_score,
+  conspiracy_score,
+  intolerance_score
+)]
+
+# Combine
+feature_df <- cbind(
+  dt[, .(article_id, newspaper_name, year, year_month, uncivil_score)],
+  meta_features,
+  svd_df
+)
+
+# Save feature matrix
+outpath <- file.path(DATA_PANELS, "rf_features.parquet")
+write_parquet(feature_df, outpath)
+message("Saved feature matrix: ", nrow(feature_df), " rows x ",
+        ncol(feature_df), " cols -> ", outpath)
+
+# Also save the SVD model for scoring new data later
+saveRDS(list(
+  center = attr(svd_result, "center"),  # may be NULL after cleanup
+  rotation = NULL,  # we'll recompute if needed
+  vocab = colnames(dfmat_tfidf)  # vocabulary used
+), file.path(MODELS_DIR, "svd_model_info.rds"))
+```
+
+## Feature summary
+
+```{r feature-summary}
+message("\nFeature matrix summary:")
+message("  Rows: ", nrow(feature_df))
+message("  Columns: ", ncol(feature_df))
+message("  SVD components: ", sum(grepl("^svd_", names(feature_df))))
+message("  Metadata features: front_page, headline_length, n_words, ",
+        "has_byline, ocr_quality, page_num + 5 sub-scores")
+
+# Distribution of pseudo-labels
+q90 <- quantile(feature_df$uncivil_score, 0.90, na.rm = TRUE)
+q50 <- quantile(feature_df$uncivil_score, 0.50, na.rm = TRUE)
+message("\n  Uncivil score p90: ", round(q90, 3))
+message("  Uncivil score p50: ", round(q50, 3))
+message("  Articles above p90 (pseudo-incivil): ",
+        sum(feature_df$uncivil_score >= q90, na.rm = TRUE))
+message("  Articles below p50 (pseudo-civil): ",
+        sum(feature_df$uncivil_score <= q50, na.rm = TRUE))
+```

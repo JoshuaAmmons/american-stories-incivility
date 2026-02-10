@@ -1,0 +1,108 @@
+---
+title: "02 — Parse and Clean Articles"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+source("C:/Users/ammonsj/Ideas/R/helpers.R")
+```
+
+## Load and clean article data
+
+Read all Parquet files, add computed metadata columns, and write a
+cleaned dataset partitioned by year.
+
+```{r load-and-clean}
+library(arrow)
+library(dplyr)
+library(stringr)
+library(data.table)
+
+# Open all article parquet files as a dataset
+parquet_files <- list.files(DATA_PARQUET, pattern = "^articles_\\d{4}\\.parquet$",
+                            full.names = TRUE)
+message("Found ", length(parquet_files), " Parquet files")
+
+# Process year by year to manage memory
+cleaned_dir <- file.path(DATA_PARQUET, "articles_cleaned")
+dir.create(cleaned_dir, recursive = TRUE, showWarnings = FALSE)
+
+for (pf in parquet_files) {
+  yr <- gsub(".*articles_(\\d{4})\\.parquet", "\\1", pf)
+  outpath <- file.path(cleaned_dir, paste0("year=", yr), "part-0.parquet")
+
+  if (file.exists(outpath)) {
+    message("Year ", yr, " already cleaned, skipping.")
+    next
+  }
+
+  message("Cleaning year ", yr, "...")
+  df <- read_parquet(pf)
+
+  if (nrow(df) == 0) {
+    message("  Empty, skipping.")
+    next
+  }
+
+  # Parse and add metadata
+  dt <- as.data.table(df)
+
+  # Parse date
+  dt[, date := as.Date(date, format = "%Y-%m-%d")]
+  dt[, year := as.integer(format(date, "%Y"))]
+  dt[, month := as.integer(format(date, "%m"))]
+  dt[, year_month := format(date, "%Y-%m")]
+
+  # Parse page number
+  dt[, page_num := parse_page(page)]
+  dt[, front_page := as.integer(!is.na(page_num) & page_num == 1)]
+
+  # Article metadata
+  dt[, n_words := count_words(article)]
+  dt[, headline_length := nchar(headline)]
+  dt[, has_byline := as.integer(nchar(trimws(byline)) > 0)]
+
+  # OCR quality proxy
+  dt[, ocr_quality := 1 - share_nonalpha(article)]
+
+  # Filter: require at least 10 words and reasonable OCR
+  dt <- dt[!is.na(n_words) & n_words >= 10]
+
+  # Add year column for partitioning
+  dt[, year := as.integer(yr)]
+
+  # Write partitioned output
+  dir.create(dirname(outpath), recursive = TRUE, showWarnings = FALSE)
+  write_parquet(dt, outpath)
+  message("  Saved ", nrow(dt), " cleaned articles for year ", yr)
+
+  rm(df, dt)
+  gc()
+}
+```
+
+## Verify cleaned data
+
+```{r verify}
+cleaned_ds <- open_dataset(cleaned_dir, partitioning = "year")
+message("Total cleaned articles: ",
+        cleaned_ds |> count() |> collect() |> pull(n))
+message("Columns: ", paste(names(cleaned_ds), collapse = ", "))
+
+# Summary stats
+summary_stats <- cleaned_ds |>
+  summarise(
+    n_articles = n(),
+    n_newspapers = n_distinct(newspaper_name),
+    min_date = min(date, na.rm = TRUE),
+    max_date = max(date, na.rm = TRUE),
+    mean_words = mean(n_words, na.rm = TRUE),
+    mean_ocr = mean(ocr_quality, na.rm = TRUE)
+  ) |>
+  collect()
+
+print(summary_stats)
+```

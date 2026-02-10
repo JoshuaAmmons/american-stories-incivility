@@ -1,0 +1,119 @@
+---
+title: "01 — Download American Stories Data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Download American Stories (1774–1960)
+
+Download article-level data year by year via Python `datasets` library,
+then save each year as a Parquet file.
+
+```{r download}
+library(reticulate)
+library(arrow)
+
+use_python(PYTHON_EXE, required = TRUE)
+datasets <- import("datasets")
+
+# Determine which years still need downloading
+existing <- gsub("articles_|\\.parquet", "",
+                 list.files(DATA_PARQUET, pattern = "^articles_\\d{4}\\.parquet$"))
+to_download <- setdiff(YEARS_ALL, existing)
+
+message(length(to_download), " years to download. ",
+        length(existing), " already done.")
+
+if (length(to_download) > 0) {
+  # Process in batches of 10 years to manage memory
+  batches <- split(to_download, ceiling(seq_along(to_download) / 10))
+
+  for (i in seq_along(batches)) {
+    batch <- batches[[i]]
+    message("\n=== Batch ", i, "/", length(batches),
+            ": years ", batch[1], "-", batch[length(batch)], " ===")
+
+    tryCatch({
+      ds <- datasets$load_dataset(
+        "dell-research-harvard/AmericanStories",
+        "subset_years",
+        year_list = as.list(batch),
+        trust_remote_code = TRUE
+      )
+
+      # Each year is a split in the dataset
+      for (yr in names(ds)) {
+        message("  Converting year ", yr, "...")
+        year_data <- ds[[yr]]
+
+        # Convert to pandas then to R data.frame
+        pdf <- year_data$to_pandas()
+        df <- as.data.frame(pdf)
+
+        if (nrow(df) > 0) {
+          outpath <- file.path(DATA_PARQUET, paste0("articles_", yr, ".parquet"))
+          write_parquet(df, outpath)
+          message("  Saved ", nrow(df), " articles -> ", outpath)
+        } else {
+          message("  Year ", yr, " has 0 articles, skipping.")
+        }
+      }
+
+      # Free memory
+      rm(ds, pdf, df)
+      gc()
+
+    }, error = function(e) {
+      message("  ERROR in batch ", i, ": ", conditionMessage(e))
+      # Try individual years in the batch
+      for (yr in batch) {
+        tryCatch({
+          outpath <- file.path(DATA_PARQUET, paste0("articles_", yr, ".parquet"))
+          if (file.exists(outpath)) next
+
+          message("  Retrying year ", yr, " individually...")
+          ds_single <- datasets$load_dataset(
+            "dell-research-harvard/AmericanStories",
+            "subset_years",
+            year_list = list(yr),
+            trust_remote_code = TRUE
+          )
+          pdf <- ds_single[[yr]]$to_pandas()
+          df <- as.data.frame(pdf)
+          if (nrow(df) > 0) {
+            write_parquet(df, outpath)
+            message("    Saved ", nrow(df), " articles for ", yr)
+          }
+          rm(ds_single, pdf, df)
+          gc()
+        }, error = function(e2) {
+          message("    FAILED year ", yr, ": ", conditionMessage(e2))
+        })
+      }
+    })
+  }
+}
+```
+
+## Summary
+
+```{r summary}
+parquet_files <- list.files(DATA_PARQUET, pattern = "^articles_\\d{4}\\.parquet$",
+                            full.names = TRUE)
+message("Total Parquet files: ", length(parquet_files))
+
+# Show file sizes
+info <- file.info(parquet_files)
+info$year <- gsub(".*articles_(\\d{4})\\.parquet", "\\1", rownames(info))
+info$size_mb <- round(info$size / 1e6, 1)
+message("Total size: ", round(sum(info$size) / 1e9, 2), " GB")
+
+# Show first/last years
+cat("Years available:", sort(info$year)[1], "to",
+    sort(info$year)[length(info$year)], "\n")
+```

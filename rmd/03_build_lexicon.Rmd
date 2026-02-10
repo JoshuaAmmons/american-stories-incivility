@@ -1,0 +1,142 @@
+---
+title: "03 — Build Incivility Lexicon and Score Articles"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+source("C:/Users/ammonsj/Ideas/R/helpers.R")
+```
+
+## Define incivility lexicon
+
+Historically-appropriate terms for 1774–1960 newspaper discourse.
+
+```{r lexicon}
+# Insult / contempt
+insult_terms <- c(
+  "traitor", "vermin", "scum", "filth", "degenerate", "coward",
+  "liar", "crook", "fool", "idiot", "imbecile", "buffoon",
+  "scoundrel", "villain", "rascal", "wretch", "charlatan",
+  "demagogue", "tyrant", "hypocrite", "fanatic"
+)
+
+# Dehumanization / exclusion
+dehumanize_terms <- c(
+  "parasite", "menace", "plague", "infestation", "horde",
+  "mongrel", "undesirable", "vermin", "subversive", "agitator",
+  "anarchist", "rabble", "riffraff", "dregs"
+)
+
+# Violence endorsement
+violence_terms <- c(
+  "lynch", "lynching", "mob", "riot", "exterminate", "crush",
+  "destroy", "purge", "eradicate", "smash", "annihilate"
+)
+
+# Conspiracy / irrationality
+conspiracy_terms <- c(
+  "cabal", "conspiracy", "conspirators", "secret plot", "puppet",
+  "controlled by", "sinister", "treachery", "plot against",
+  "hidden hand", "fifth column"
+)
+
+# Intolerance / outgroup hostility
+intolerance_terms <- c(
+  "foreigners", "invaders", "inferior", "savage", "barbarous",
+  "uncivilized", "deport", "expel", "banish", "exclude"
+)
+
+# Combined lexicon
+uncivil_lexicon <- unique(c(insult_terms, dehumanize_terms, violence_terms,
+                            conspiracy_terms, intolerance_terms))
+
+message("Lexicon size: ", length(uncivil_lexicon), " terms")
+cat("Terms:\n", paste(uncivil_lexicon, collapse = ", "), "\n")
+```
+
+## Score all articles
+
+```{r score}
+library(arrow)
+library(data.table)
+
+cleaned_dir <- file.path(DATA_PARQUET, "articles_cleaned")
+scored_dir <- file.path(DATA_PARQUET, "articles_scored")
+dir.create(scored_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Save lexicon for reproducibility
+saveRDS(uncivil_lexicon, file.path(MODELS_DIR, "uncivil_lexicon.rds"))
+
+# Process year by year
+parquet_parts <- list.files(cleaned_dir, pattern = "part-0\\.parquet$",
+                            full.names = TRUE, recursive = TRUE)
+
+for (pf in parquet_parts) {
+  yr <- gsub(".*year=(\\d{4}).*", "\\1", pf)
+  outpath <- file.path(scored_dir, paste0("scored_", yr, ".parquet"))
+
+  if (file.exists(outpath)) {
+    message("Year ", yr, " already scored, skipping.")
+    next
+  }
+
+  message("Scoring year ", yr, "...")
+  dt <- as.data.table(read_parquet(pf))
+
+  # Score each article against the lexicon
+  dt[, uncivil_score := lexicon_score(article, uncivil_lexicon)]
+
+  # Also score subcategories
+  dt[, insult_score := lexicon_score(article, insult_terms)]
+  dt[, dehumanize_score := lexicon_score(article, dehumanize_terms)]
+  dt[, violence_score := lexicon_score(article, violence_terms)]
+  dt[, conspiracy_score := lexicon_score(article, conspiracy_terms)]
+  dt[, intolerance_score := lexicon_score(article, intolerance_terms)]
+
+  write_parquet(dt, outpath)
+  message("  Scored ", nrow(dt), " articles for year ", yr)
+
+  rm(dt)
+  gc()
+}
+```
+
+## Summary statistics
+
+```{r summary}
+library(dplyr)
+
+scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRUE)
+ds <- open_dataset(scored_files)
+
+score_summary <- ds |>
+  summarise(
+    n_articles = n(),
+    mean_uncivil = mean(uncivil_score, na.rm = TRUE),
+    sd_uncivil = sd(uncivil_score, na.rm = TRUE),
+    median_uncivil = median(uncivil_score, na.rm = TRUE),
+    p90_uncivil = quantile(uncivil_score, 0.90, na.rm = TRUE),
+    p99_uncivil = quantile(uncivil_score, 0.99, na.rm = TRUE),
+    share_any_uncivil = mean(uncivil_score > 0, na.rm = TRUE)
+  ) |>
+  collect()
+
+print(score_summary)
+
+# Score distribution by decade
+decade_scores <- ds |>
+  mutate(decade = as.integer(year / 10) * 10L) |>
+  group_by(decade) |>
+  summarise(
+    n = n(),
+    mean_score = mean(uncivil_score, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  collect() |>
+  arrange(decade)
+
+print(decade_scores)
+```

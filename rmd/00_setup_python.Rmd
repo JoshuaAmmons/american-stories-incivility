@@ -1,0 +1,35 @@
+---
+title: "00 — Setup Python Environment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Install Python dependencies
+
+We need the `datasets` and `huggingface_hub` packages to download
+American Stories from HuggingFace.
+
+```{r install-python-deps}
+library(reticulate)
+use_python(PYTHON_EXE, required = TRUE)
+
+# Install datasets and huggingface_hub if not present
+py_install(c("datasets", "huggingface_hub", "pyarrow"), pip = TRUE)
+```
+
+## Verify Python setup
+
+```{r verify}
+datasets <- import("datasets")
+message("datasets version: ", datasets$`__version__`)
+
+hf <- import("huggingface_hub")
+message("huggingface_hub version: ", hf$`__version__`)
+
+message("Python setup complete.")
+```

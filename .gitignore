@@ -1,0 +1,27 @@
+# Data (too large for git)
+data_raw/
+data_parquet/
+data_panels/
+models/
+*.tar.gz
+*.parquet
+*.rds
+*.RData
+
+# R session files
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# HuggingFace cache
+.cache/

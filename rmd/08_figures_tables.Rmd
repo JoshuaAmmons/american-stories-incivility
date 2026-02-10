@@ -1,0 +1,267 @@
+---
+title: "08 — Publication Figures and Tables"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE,
+                      fig.width = 8, fig.height = 6, dpi = 300)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Load models and data
+
+```{r load}
+library(data.table)
+library(arrow)
+library(ggplot2)
+library(patchwork)
+library(fect)
+
+# Load fect models
+out_ife     <- readRDS(file.path(MODELS_DIR, "fect_ife.rds"))
+out_mc      <- readRDS(file.path(MODELS_DIR, "fect_mc.rds"))
+out_fe      <- readRDS(file.path(MODELS_DIR, "fect_fe.rds"))
+out_placebo <- readRDS(file.path(MODELS_DIR, "fect_placebo.rds"))
+out_carry   <- readRDS(file.path(MODELS_DIR, "fect_carryover.rds"))
+out_ife_lex <- readRDS(file.path(MODELS_DIR, "fect_ife_lexicon.rds"))
+
+# Load panel
+panel <- as.data.table(read_parquet(
+  file.path(DATA_PANELS, "did_panel.parquet")
+))
+
+message("All models and data loaded.")
+```
+
+## Figure 1: IFE ATT Dynamic Plot
+
+```{r fig-ife-att}
+pdf(file.path(FIGURES_DIR, "fig1_ife_att.pdf"), width = 8, height = 6)
+plot(out_ife, main = "ATT Estimates: Interactive Fixed Effects",
+     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+     cex.main = 1.2, cex.lab = 1.1)
+dev.off()
+
+png(file.path(FIGURES_DIR, "fig1_ife_att.png"), width = 8, height = 6,
+    units = "in", res = 300)
+plot(out_ife, main = "ATT Estimates: Interactive Fixed Effects",
+     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+     cex.main = 1.2, cex.lab = 1.1)
+dev.off()
+
+# Copy to Overleaf
+file.copy(file.path(FIGURES_DIR, "fig1_ife_att.pdf"),
+          file.path(OVERLEAF_FIGURES, "fig1_ife_att.pdf"), overwrite = TRUE)
+file.copy(file.path(FIGURES_DIR, "fig1_ife_att.png"),
+          file.path(OVERLEAF_FIGURES, "fig1_ife_att.png"), overwrite = TRUE)
+
+message("Figure 1 saved.")
+```
+
+## Figure 2: Placebo Test
+
+```{r fig-placebo}
+pdf(file.path(FIGURES_DIR, "fig2_placebo_test.pdf"), width = 8, height = 6)
+plot(out_placebo, main = "Placebo Test (Pre-Treatment Periods)",
+     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+     cex.main = 1.2, cex.lab = 1.1)
+dev.off()
+
+png(file.path(FIGURES_DIR, "fig2_placebo_test.png"), width = 8, height = 6,
+    units = "in", res = 300)
+plot(out_placebo, main = "Placebo Test (Pre-Treatment Periods)",
+     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+     cex.main = 1.2, cex.lab = 1.1)
+dev.off()
+
+file.copy(file.path(FIGURES_DIR, "fig2_placebo_test.pdf"),
+          file.path(OVERLEAF_FIGURES, "fig2_placebo_test.pdf"), overwrite = TRUE)
+file.copy(file.path(FIGURES_DIR, "fig2_placebo_test.png"),
+          file.path(OVERLEAF_FIGURES, "fig2_placebo_test.png"), overwrite = TRUE)
+
+message("Figure 2 saved.")
+```
+
+## Figure 3: Carryover Test (Persistence / Equilibrium Shift)
+
+```{r fig-carryover}
+pdf(file.path(FIGURES_DIR, "fig3_carryover_test.pdf"), width = 8, height = 6)
+plot(out_carry, main = "Carryover Test (Effect Persistence)",
+     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+     cex.main = 1.2, cex.lab = 1.1)
+dev.off()
+
+png(file.path(FIGURES_DIR, "fig3_carryover_test.png"), width = 8, height = 6,
+    units = "in", res = 300)
+plot(out_carry, main = "Carryover Test (Effect Persistence)",
+     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+     cex.main = 1.2, cex.lab = 1.1)
+dev.off()
+
+file.copy(file.path(FIGURES_DIR, "fig3_carryover_test.pdf"),
+          file.path(OVERLEAF_FIGURES, "fig3_carryover_test.pdf"), overwrite = TRUE)
+file.copy(file.path(FIGURES_DIR, "fig3_carryover_test.png"),
+          file.path(OVERLEAF_FIGURES, "fig3_carryover_test.png"), overwrite = TRUE)
+
+message("Figure 3 saved.")
+```
+
+## Figure 4: Matrix Completion vs IFE Comparison
+
+```{r fig-comparison}
+pdf(file.path(FIGURES_DIR, "fig4_mc_comparison.pdf"), width = 10, height = 5)
+par(mfrow = c(1, 2))
+plot(out_ife, main = "IFE", ylab = "ATT", xlab = "Periods",
+     cex.main = 1.1, cex.lab = 1.0)
+plot(out_mc, main = "Matrix Completion", ylab = "ATT", xlab = "Periods",
+     cex.main = 1.1, cex.lab = 1.0)
+dev.off()
+
+png(file.path(FIGURES_DIR, "fig4_mc_comparison.png"), width = 10, height = 5,
+    units = "in", res = 300)
+par(mfrow = c(1, 2))
+plot(out_ife, main = "IFE", ylab = "ATT", xlab = "Periods",
+     cex.main = 1.1, cex.lab = 1.0)
+plot(out_mc, main = "Matrix Completion", ylab = "ATT", xlab = "Periods",
+     cex.main = 1.1, cex.lab = 1.0)
+dev.off()
+
+file.copy(file.path(FIGURES_DIR, "fig4_mc_comparison.pdf"),
+          file.path(OVERLEAF_FIGURES, "fig4_mc_comparison.pdf"), overwrite = TRUE)
+file.copy(file.path(FIGURES_DIR, "fig4_mc_comparison.png"),
+          file.path(OVERLEAF_FIGURES, "fig4_mc_comparison.png"), overwrite = TRUE)
+
+message("Figure 4 saved.")
+```
+
+## Figure 5: Incivility Time Series (Treated vs Control)
+
+```{r fig-timeseries}
+panel[, ever_treated := as.integer(!is.na(treat_date))]
+
+ts_data <- panel[, .(
+  incivil_treated = mean(incivil_rate_rf[ever_treated == 1], na.rm = TRUE),
+  incivil_control = mean(incivil_rate_rf[ever_treated == 0], na.rm = TRUE)
+), by = year_month]
+
+ts_data[, ym_date := as.Date(paste0(year_month, "-01"))]
+setorder(ts_data, ym_date)
+
+# Only plot study window (1920-1945) for clarity
+ts_plot_data <- ts_data[ym_date >= as.Date("1920-01-01") &
+                        ym_date <= as.Date("1945-01-01")]
+
+if (nrow(ts_plot_data) > 0) {
+  p_ts <- ggplot(ts_plot_data, aes(x = ym_date)) +
+    geom_line(aes(y = incivil_treated, color = "Treated"), alpha = 0.7) +
+    geom_line(aes(y = incivil_control, color = "Control"), alpha = 0.7) +
+    geom_vline(xintercept = as.Date("1936-01-01"),
+               linetype = "dashed", color = "gray40") +
+    annotate("text", x = as.Date("1936-06-01"), y = Inf,
+             label = "Coughlin peak", vjust = 2, size = 3) +
+    scale_color_manual(values = c("Treated" = "firebrick", "Control" = "steelblue")) +
+    labs(x = "Date", y = "Mean Incivility Rate",
+         title = "Newspaper Incivility: Treated vs Control",
+         color = "Group") +
+    theme_minimal(base_size = 12)
+
+  save_figure(p_ts, "fig5_timeseries", width = 9, height = 5)
+  print(p_ts)
+} else {
+  message("No data in 1920-1945 window for time series plot.")
+}
+```
+
+## Figure 6: RF Variable Importance
+
+This was already created in 05_random_forest.Rmd but we copy to Overleaf.
+
+```{r fig-rf-importance}
+# Copy if exists
+for (ext in c("pdf", "png")) {
+  src <- file.path(FIGURES_DIR, paste0("rf_variable_importance.", ext))
+  if (file.exists(src)) {
+    file.copy(src, file.path(OVERLEAF_FIGURES,
+              paste0("fig6_rf_importance.", ext)), overwrite = TRUE)
+  }
+}
+message("Figure 6 (RF importance) copied to Overleaf.")
+```
+
+## Figure 7: RF Calibration
+
+```{r fig-rf-calibration}
+for (ext in c("pdf", "png")) {
+  src <- file.path(FIGURES_DIR, paste0("rf_calibration.", ext))
+  if (file.exists(src)) {
+    file.copy(src, file.path(OVERLEAF_FIGURES,
+              paste0("fig7_rf_calibration.", ext)), overwrite = TRUE)
+  }
+}
+message("Figure 7 (RF calibration) copied to Overleaf.")
+```
+
+## Table: Main Results
+
+```{r table-main}
+# Extract ATT from each model
+extract_att <- function(model, label) {
+  att <- model$att.avg
+  se <- model$att.avg.se
+  data.table(
+    Model = label,
+    ATT = round(att, 4),
+    SE = round(se, 4),
+    `95% CI` = paste0("[", round(att - 1.96*se, 4), ", ", round(att + 1.96*se, 4), "]"),
+    `p-value` = round(2 * pnorm(-abs(att / se)), 4)
+  )
+}
+
+results <- rbindlist(list(
+  extract_att(out_ife, "IFE (primary)"),
+  extract_att(out_mc, "Matrix Completion"),
+  extract_att(out_fe, "Two-Way FE"),
+  extract_att(out_ife_lex, "IFE (lexicon outcome)")
+))
+
+tex <- knitr::kable(results, format = "latex", booktabs = TRUE,
+                    caption = "Estimated ATT: Effect of Coughlin Exposure on Newspaper Incivility")
+
+for (dir in c(TABLES_DIR, OVERLEAF_TABLES)) {
+  writeLines(tex, file.path(dir, "main_results.tex"))
+}
+message("Main results table saved.")
+print(results)
+```
+
+## Table: Robustness
+
+```{r table-robustness}
+# Robustness specifications
+rob_results <- rbindlist(list(
+  extract_att(out_ife, "IFE — RF outcome"),
+  extract_att(out_ife_lex, "IFE — Lexicon outcome")
+))
+
+tex_rob <- knitr::kable(rob_results, format = "latex", booktabs = TRUE,
+                        caption = "Robustness: Alternative Outcome Measures")
+
+for (dir in c(TABLES_DIR, OVERLEAF_TABLES)) {
+  writeLines(tex_rob, file.path(dir, "robustness.tex"))
+}
+message("Robustness table saved.")
+```
+
+## Final file listing
+
+```{r file-listing}
+message("\n=== Files in Overleaf Figures ===")
+cat(list.files(OVERLEAF_FIGURES), sep = "\n")
+
+message("\n=== Files in Overleaf Tables ===")
+cat(list.files(OVERLEAF_TABLES), sep = "\n")
+
+message("\nAll figures and tables exported successfully.")
+```
