@@ -10,15 +10,33 @@ source("C:/Users/ammonsj/Ideas/_config.R")
 source("C:/Users/ammonsj/Ideas/R/helpers.R")
 ```
 
-## Load feature matrix
+## Check for existing model (fast-path for scoring only)
 
-```{r load}
+```{r check-model}
 library(arrow)
 library(data.table)
 library(ranger)
 library(pROC)
 library(ggplot2)
 
+model_path <- file.path(MODELS_DIR, "rf_incivility_model.rds")
+cal_path   <- file.path(MODELS_DIR, "calibration_fn.rds")
+fcols_path <- file.path(MODELS_DIR, "feature_cols.rds")
+
+model_exists <- file.exists(model_path) && file.exists(cal_path) && file.exists(fcols_path)
+
+if (model_exists) {
+  message("Existing RF model found — skipping training, jumping to scoring.")
+  rf_final     <- readRDS(model_path)
+  calibrate_fn <- readRDS(cal_path)
+  feature_cols <- readRDS(fcols_path)
+  message("  Model loaded with ", length(feature_cols), " features.")
+}
+```
+
+## Load feature matrix
+
+```{r load, eval=!model_exists}
 feature_df <- as.data.table(read_parquet(
   file.path(DATA_PANELS, "rf_features.parquet")
 ))
@@ -28,33 +46,63 @@ message("Loaded ", nrow(feature_df), " articles with ",
 
 ## Create pseudo-labels (distant supervision)
 
-```{r labels}
-# Thresholds
-q90 <- quantile(feature_df$uncivil_score, 0.90, na.rm = TRUE)
-q50 <- quantile(feature_df$uncivil_score, 0.50, na.rm = TRUE)
+```{r labels, eval=!model_exists}
+# The uncivil_score distribution is extremely zero-inflated (~96% are 0).
+# Using raw quantiles would make q50=q90=0, collapsing all labels.
+# Instead, define labels based on zero vs non-zero structure:
+#   Civil (0): articles with zero lexicon score (no incivility signal)
+#   Uncivil (1): articles with score above the 75th percentile of non-zero scores
+#   Excluded (NA): articles with low positive scores (ambiguous)
 
-# Label: 1 = incivil (above p90), 0 = civil (below p50), NA = excluded
+nonzero_scores <- feature_df$uncivil_score[feature_df$uncivil_score > 0]
+q75_nonzero <- quantile(nonzero_scores, 0.75, na.rm = TRUE)
+
+message("Score distribution: ",
+        sum(feature_df$uncivil_score == 0), " zero, ",
+        length(nonzero_scores), " nonzero")
+message("Threshold for uncivil (p75 of nonzero): ", round(q75_nonzero, 3))
+
 feature_df[, label := fifelse(
-  uncivil_score >= q90, 1L,
-  fifelse(uncivil_score <= q50, 0L, NA_integer_)
+  uncivil_score >= q75_nonzero, 1L,
+  fifelse(uncivil_score == 0, 0L, NA_integer_)
 )]
 
 labeled <- feature_df[!is.na(label)]
 message("Labeled articles: ", nrow(labeled),
         " (incivil: ", sum(labeled$label == 1),
         ", civil: ", sum(labeled$label == 0), ")")
+
+# Downsample civil class to at most 10x uncivil for balanced-ish training
+n_uncivil <- sum(labeled$label == 1)
+n_civil <- sum(labeled$label == 0)
+if (n_civil > 10 * n_uncivil) {
+  set.seed(SEED)
+  civil_ids <- labeled[label == 0, which = TRUE]
+  keep_civil <- sample(civil_ids, 10 * n_uncivil)
+  uncivil_ids <- labeled[label == 1, which = TRUE]
+  labeled <- labeled[sort(c(keep_civil, uncivil_ids))]
+  message("Downsampled civil class: ", nrow(labeled),
+          " (incivil: ", sum(labeled$label == 1),
+          ", civil: ", sum(labeled$label == 0), ")")
+}
 ```
 
 ## Grouped k-fold CV by newspaper
 
-```{r cv}
-# Assign newspapers to 5 folds
+```{r cv, eval=!model_exists}
+# Stratified grouped CV: assign newspapers to folds ensuring both classes
+# in each fold. Classify each newspaper by its majority label, then
+# stratify so each fold gets a mix of "mostly uncivil" and "mostly civil"
+# newspapers.
 set.seed(SEED)
-newspapers <- unique(labeled$newspaper_name)
-np_folds <- data.table(
-  newspaper_name = newspapers,
-  fold = sample(rep(1:5, length.out = length(newspapers)))
-)
+np_class <- labeled[, .(frac_uncivil = mean(label)), by = newspaper_name]
+np_class[, np_type := fifelse(frac_uncivil > 0.5, "uncivil", "civil")]
+
+# Shuffle within each type, then assign folds round-robin
+np_class <- np_class[sample(.N)]
+np_class[, fold := rep(1:5, length.out = .N), by = np_type]
+
+np_folds <- np_class[, .(newspaper_name, fold)]
 labeled <- merge(labeled, np_folds, by = "newspaper_name")
 
 # Feature columns (exclude identifiers and target)
@@ -79,7 +127,7 @@ message("Feature columns: ", length(feature_cols))
 
 ## Train and evaluate
 
-```{r train}
+```{r train, eval=!model_exists}
 cv_results <- list()
 all_preds <- data.table()
 
@@ -91,12 +139,14 @@ for (k in 1:5) {
   train_data <- labeled[train_idx, c(feature_cols, "label"), with = FALSE]
   test_data <- labeled[test_idx, c(feature_cols, "label"), with = FALSE]
 
-  # Convert label to factor for classification
-  train_data[, label := factor(label)]
-  test_data_labels <- test_data$label
-  test_data[, label := factor(label)]
+  # Convert label to factor with explicit levels for classification
+  train_data[, label := factor(label, levels = c("0", "1"))]
+  test_data_labels <- test_data$label  # integer 0/1
+  test_data[, label := factor(label, levels = c("0", "1"))]
 
   message("  Train: ", nrow(train_data), " | Test: ", nrow(test_data))
+  message("  Test class balance: 0=", sum(test_data_labels == 0),
+          ", 1=", sum(test_data_labels == 1))
 
   # Train ranger
   rf <- ranger(
@@ -108,19 +158,25 @@ for (k in 1:5) {
     probability = TRUE,
     importance = "impurity",
     seed = SEED,
-    num.threads = parallel::detectCores() - 1
+    num.threads = 2L
   )
 
   # Predict on test
   pred <- predict(rf, test_data)
   p_incivil <- pred$predictions[, "1"]
 
-  # Metrics
-  roc_obj <- roc(test_data_labels, p_incivil, quiet = TRUE)
-  auc_val <- as.numeric(auc(roc_obj))
+  # Metrics (handle degenerate folds gracefully)
+  auc_val <- tryCatch({
+    roc_obj <- roc(factor(test_data_labels, levels = c(0, 1)),
+                   p_incivil, quiet = TRUE)
+    as.numeric(auc(roc_obj))
+  }, error = function(e) {
+    message("  AUC unavailable (single-class fold): ", e$message)
+    NA_real_
+  })
 
   # Brier score
-  brier <- mean((p_incivil - as.numeric(test_data_labels))^2)
+  brier <- mean((p_incivil - test_data_labels)^2)
 
   cv_results[[k]] <- data.table(fold = k, auc = auc_val, brier = brier)
   message("  AUC: ", round(auc_val, 4), " | Brier: ", round(brier, 4))
@@ -140,14 +196,14 @@ for (k in 1:5) {
 
 cv_summary <- rbindlist(cv_results)
 message("\n=== CV Summary ===")
-message("Mean AUC: ", round(mean(cv_summary$auc), 4),
-        " (SD: ", round(sd(cv_summary$auc), 4), ")")
-message("Mean Brier: ", round(mean(cv_summary$brier), 4))
+message("Mean AUC: ", round(mean(cv_summary$auc, na.rm = TRUE), 4),
+        " (SD: ", round(sd(cv_summary$auc, na.rm = TRUE), 4), ")")
+message("Mean Brier: ", round(mean(cv_summary$brier, na.rm = TRUE), 4))
 ```
 
 ## Probability calibration
 
-```{r calibrate}
+```{r calibrate, eval=!model_exists}
 # Fit isotonic calibration on all CV predictions
 calibrate_fn <- fit_isotonic(all_preds$p_incivil, all_preds$actual)
 all_preds[, p_calibrated := calibrate_fn(p_incivil)]
@@ -177,34 +233,47 @@ save_figure(p_cal, "rf_calibration", width = 6, height = 6)
 print(p_cal)
 ```
 
-## Train final model on all labeled data
+## Train final model on all labeled data (or load existing)
 
-```{r final-model}
-train_all <- labeled[, c(feature_cols, "label"), with = FALSE]
-train_all[, label := factor(label)]
+```{r final-model, eval=!model_exists}
+model_path <- file.path(MODELS_DIR, "rf_incivility_model.rds")
+cal_path   <- file.path(MODELS_DIR, "calibration_fn.rds")
+fcols_path <- file.path(MODELS_DIR, "feature_cols.rds")
 
-rf_final <- ranger(
-  label ~ .,
-  data = train_all,
-  num.trees = 500,
-  mtry = floor(sqrt(length(feature_cols))),
-  min.node.size = 10,
-  probability = TRUE,
-  importance = "impurity",
-  seed = SEED,
-  num.threads = parallel::detectCores() - 1
-)
+if (file.exists(model_path) && file.exists(cal_path) && file.exists(fcols_path)) {
+  message("Loading existing RF model (skipping retraining).")
+  rf_final     <- readRDS(model_path)
+  calibrate_fn <- readRDS(cal_path)
+  feature_cols <- readRDS(fcols_path)
+  message("  Model loaded with ", length(feature_cols), " features.")
+} else {
+  message("Training final RF model on all labeled data...")
+  train_all <- labeled[, c(feature_cols, "label"), with = FALSE]
+  train_all[, label := factor(label, levels = c("0", "1"))]
 
-# Save model
-saveRDS(rf_final, file.path(MODELS_DIR, "rf_incivility_model.rds"))
-saveRDS(calibrate_fn, file.path(MODELS_DIR, "calibration_fn.rds"))
-saveRDS(feature_cols, file.path(MODELS_DIR, "feature_cols.rds"))
-message("Saved final RF model and calibration function.")
+  rf_final <- ranger(
+    label ~ .,
+    data = train_all,
+    num.trees = 500,
+    mtry = floor(sqrt(length(feature_cols))),
+    min.node.size = 10,
+    probability = TRUE,
+    importance = "impurity",
+    seed = SEED,
+    num.threads = 2L
+  )
+
+  # Save model
+  saveRDS(rf_final, model_path)
+  saveRDS(calibrate_fn, cal_path)
+  saveRDS(feature_cols, fcols_path)
+  message("Saved final RF model and calibration function.")
+}
 ```
 
 ## Variable importance
 
-```{r importance}
+```{r importance, eval=!model_exists}
 imp <- data.table(
   feature = names(rf_final$variable.importance),
   importance = rf_final$variable.importance
@@ -225,7 +294,11 @@ print(p_imp)
 ## Score full corpus
 
 ```{r score-corpus}
-# Score all articles using the final model + calibration
+library(quanteda)
+
+# Load SVD model info for transforming new articles
+svd_info <- readRDS(file.path(MODELS_DIR, "svd_model_info.rds"))
+
 scored_dir <- file.path(DATA_PARQUET, "articles_scored")
 scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRUE)
 
@@ -244,19 +317,73 @@ for (sf in scored_files) {
   message("RF-scoring year ", yr, "...")
   dt_year <- as.data.table(read_parquet(sf))
 
-  # Prepare features — need same columns as training
-  # Some SVD columns may be missing; we handle this by scoring only
-  # articles that were in the feature matrix, or by using the lexicon score
-  # as the primary index and RF as supplementary
-
-  # For articles not in the feature matrix, use lexicon score directly
-  # For now, store the lexicon-based score as the primary outcome
+  # Always store lexicon-based score
   dt_year[, p_incivil_lexicon := uncivil_score]
+  dt_year[, p_incivil := NA_real_]
 
-  # If this article was in our feature matrix, score it with RF
-  # For the full pipeline, we'd need to recompute SVD features for all articles
-  # This is the simplified version using lexicon as primary
-  dt_year[, p_incivil := uncivil_score]
+  # Process in chunks to avoid memory blow-up on large years
+  chunk_size <- 50000L
+  n_total <- nrow(dt_year)
+  n_chunks <- ceiling(n_total / chunk_size)
+  message("  Articles: ", n_total, " -> ", n_chunks, " chunks")
+
+  for (ci in seq_len(n_chunks)) {
+    row_start <- (ci - 1L) * chunk_size + 1L
+    row_end <- min(ci * chunk_size, n_total)
+    chunk_rows <- row_start:row_end
+
+    tryCatch({
+      chunk_text <- dt_year$article[chunk_rows]
+      corp_c <- corpus(chunk_text)
+      toks_c <- tokens(corp_c, remove_punct = TRUE, remove_numbers = TRUE,
+                       remove_symbols = TRUE) |>
+        tokens_tolower() |>
+        tokens_remove(stopwords("en")) |>
+        tokens_wordstem()
+
+      dfmat_c <- dfm(toks_c)
+      dfmat_c <- dfm_tfidf(dfmat_c)
+      dfmat_c <- dfm_match(dfmat_c, svd_info$vocab)
+
+      mat_c <- as.matrix(dfmat_c)
+      if (!is.null(svd_info$center)) {
+        mat_c <- sweep(mat_c, 2, svd_info$center)
+      }
+      svd_scores <- mat_c %*% svd_info$rotation
+
+      svd_dt <- as.data.table(svd_scores)
+      names(svd_dt) <- paste0("svd_", seq_len(ncol(svd_dt)))
+
+      meta_c <- dt_year[chunk_rows, .(front_page, headline_length, n_words,
+                                       has_byline, ocr_quality, page_num,
+                                       insult_score, dehumanize_score,
+                                       violence_score, conspiracy_score,
+                                       intolerance_score)]
+      feat_c <- cbind(meta_c, svd_dt)
+
+      for (fc in feature_cols) {
+        if (!fc %in% names(feat_c)) feat_c[, (fc) := 0]
+      }
+      feat_c <- feat_c[, ..feature_cols]
+      for (col in feature_cols) {
+        set(feat_c, which(is.na(feat_c[[col]])), col, 0)
+      }
+
+      pred_c <- predict(rf_final, feat_c)
+      set(dt_year, chunk_rows, "p_incivil",
+          calibrate_fn(pred_c$predictions[, "1"]))
+
+      rm(corp_c, toks_c, dfmat_c, mat_c, svd_scores, svd_dt, meta_c, feat_c, pred_c)
+      gc()
+    }, error = function(e) {
+      message("  Chunk ", ci, " failed: ", e$message, " -> lexicon fallback")
+      set(dt_year, chunk_rows, "p_incivil",
+          dt_year$uncivil_score[chunk_rows])
+    })
+  }
+
+  # Fill any remaining NAs with lexicon fallback
+  dt_year[is.na(p_incivil), p_incivil := uncivil_score]
 
   write_parquet(
     dt_year[, .(article_id, newspaper_name, year, year_month, date,
@@ -275,7 +402,7 @@ message("\nFull corpus scoring complete.")
 
 ## Save CV results table
 
-```{r save-cv-table}
+```{r save-cv-table, eval=!model_exists}
 library(modelsummary)
 
 cv_summary[, fold := as.character(fold)]

@@ -20,6 +20,18 @@ library(arrow)
 library(data.table)
 library(dplyr)
 
+# Cache guard: skip feature engineering if outputs already exist
+outpath <- file.path(DATA_PANELS, "rf_features.parquet")
+svd_path <- file.path(MODELS_DIR, "svd_model_info.rds")
+
+if (file.exists(outpath) && file.exists(svd_path)) {
+  message("Feature matrix and SVD model already exist. Skipping feature engineering.")
+  message("  Features: ", outpath)
+  message("  SVD model: ", svd_path)
+  feature_df <- as.data.table(read_parquet(outpath))
+  knitr::knit_exit()
+}
+
 scored_dir <- file.path(DATA_PARQUET, "articles_scored")
 scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRUE)
 
@@ -35,11 +47,23 @@ message("Total scored articles: ", total_n)
 sample_rate <- min(1.0, 500000 / total_n)
 message("Sampling at rate: ", round(sample_rate, 4))
 
-# Read sample
-sample_df <- all_articles |>
-  collect()
+# Read data in chunks by year file to avoid memory blow-up
+sample_list <- list()
+target_per_file <- ceiling(500000 / length(scored_files))
 
-# Take a random sample if dataset is large
+for (sf in scored_files) {
+  chunk <- as.data.table(read_parquet(sf))
+  if (nrow(chunk) > target_per_file) {
+    idx <- sample(nrow(chunk), target_per_file)
+    chunk <- chunk[idx, ]
+  }
+  sample_list[[length(sample_list) + 1]] <- chunk
+  rm(chunk); gc()
+}
+sample_df <- rbindlist(sample_list, fill = TRUE)
+rm(sample_list); gc()
+
+# Final trim to 500K if needed
 if (nrow(sample_df) > 500000) {
   idx <- sample(nrow(sample_df), 500000)
   sample_df <- sample_df[idx, ]
@@ -91,8 +115,19 @@ svd_df <- as.data.table(svd_result$x)
 names(svd_df) <- paste0("svd_", seq_len(ncol(svd_df)))
 message("SVD components: ", ncol(svd_df))
 
+# Save SVD model info BEFORE cleanup so we can score new articles later
+# We need: rotation matrix, center vector, and the vocabulary
+svd_vocab <- featnames(dfmat_tfidf)
+saveRDS(list(
+  center = svd_result$center,
+  rotation = svd_result$rotation,
+  vocab = svd_vocab,
+  n_components = n_components
+), file.path(MODELS_DIR, "svd_model_info.rds"))
+message("Saved SVD model info for corpus scoring.")
+
 # Clean up large objects
-rm(corp, toks, dfmat, dfmat_tfidf, mat, svd_result)
+rm(corp, toks, dfmat, dfmat_tfidf, mat, svd_result, svd_vocab)
 gc()
 ```
 
@@ -128,12 +163,7 @@ write_parquet(feature_df, outpath)
 message("Saved feature matrix: ", nrow(feature_df), " rows x ",
         ncol(feature_df), " cols -> ", outpath)
 
-# Also save the SVD model for scoring new data later
-saveRDS(list(
-  center = attr(svd_result, "center"),  # may be NULL after cleanup
-  rotation = NULL,  # we'll recompute if needed
-  vocab = colnames(dfmat_tfidf)  # vocabulary used
-), file.path(MODELS_DIR, "svd_model_info.rds"))
+# SVD model already saved above (before cleanup)
 ```
 
 ## Feature summary

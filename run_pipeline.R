@@ -17,6 +17,7 @@ steps <- c(
   "rmd/05_random_forest.Rmd",
   "rmd/06_treatment_panel.Rmd",
   "rmd/07_did_estimation.Rmd",
+  "rmd/07b_did_modern.Rmd",
   "rmd/08_figures_tables.Rmd"
 )
 

@@ -71,8 +71,8 @@ for (pf in parquet_files) {
   # Filter: require at least 10 words and reasonable OCR
   dt <- dt[!is.na(n_words) & n_words >= 10]
 
-  # Add year column for partitioning
-  dt[, year := as.integer(yr)]
+  # Ensure year is set for rows where date parsing failed
+  dt[is.na(year), year := as.integer(yr)]
 
   # Write partitioned output
   dir.create(dirname(outpath), recursive = TRUE, showWarnings = FALSE)

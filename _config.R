@@ -34,7 +34,73 @@ for (d in c(DATA_RAW, DATA_PARQUET, DATA_PANELS, MODELS_DIR,
 
 # Data parameters
 YEARS_ALL   <- as.character(1774:1960)
-YEARS_STUDY <- as.character(1926:1942)  # Coughlin window with buffer
+
+# Political figures registry — each entry defines a treatment analysis
+FIGURES <- list(
+  coughlin = list(
+    name = "Father Coughlin",
+    study_start = 1926, study_end = 1960,
+    keywords = c("coughlin", "father coughlin", "social justice",
+                 "national union for social justice"),
+    min_year = 1920  # earliest valid match (avoid pre-1900 false positives)
+  ),
+  smith = list(
+    name = "Gerald L.K. Smith",
+    study_start = 1933, study_end = 1960,
+    keywords = c("gerald smith", "gerald l.k. smith",
+                 "america first party", "christian nationalist",
+                 "cross and the flag"),
+    min_year = 1930
+  ),
+  lemke = list(
+    name = "William Lemke",
+    study_start = 1932, study_end = 1960,
+    keywords = c("william lemke", "frazier.lemke"),
+    min_year = 1920
+  ),
+  dilling = list(
+    name = "Elizabeth Dilling",
+    study_start = 1934, study_end = 1960,
+    keywords = c("elizabeth dilling", "red network",
+                 "patriotic research", "mothers. movement"),
+    min_year = 1930
+  ),
+  long = list(
+    name = "Huey Long",
+    study_start = 1928, study_end = 1960,
+    keywords = c("huey long", "share our wealth",
+                 "every man a king", "kingfish"),
+    min_year = 1920
+  ),
+  kearney = list(
+    name = "Denis Kearney",
+    study_start = 1875, study_end = 1900,
+    keywords = c("denis kearney", "kearneyism", "kearneyites",
+                 "workingmen.?s party", "chinese must go"),
+    min_year = 1870
+  ),
+  ross = list(
+    name = "Edward A. Ross",
+    study_start = 1895, study_end = 1940,
+    keywords = c("edward ross", "edward a.? ross",
+                 "old world in the new", "race suicide"),
+    min_year = 1890
+  ),
+  grant = list(
+    name = "Madison Grant",
+    study_start = 1910, study_end = 1940,
+    keywords = c("madison grant", "passing of the great race",
+                 "conquest of a continent"),
+    min_year = 1905
+  ),
+  stoddard = list(
+    name = "Lothrop Stoddard",
+    study_start = 1915, study_end = 1945,
+    keywords = c("lothrop stoddard", "rising tide of color",
+                 "revolt against civilization"),
+    min_year = 1910
+  )
+)
 
 # Random seed
 SEED <- 42

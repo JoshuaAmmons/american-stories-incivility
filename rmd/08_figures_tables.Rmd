@@ -1,5 +1,5 @@
 ---
-title: "08 — Publication Figures and Tables"
+title: "08 — Publication Figures and Tables (Multi-Figure)"
 output: html_document
 ---
 
@@ -10,258 +10,820 @@ knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
 source("C:/Users/ammonsj/Ideas/_config.R")
 ```
 
-## Load models and data
-
-```{r load}
+```{r libraries}
 library(data.table)
 library(arrow)
 library(ggplot2)
 library(patchwork)
 library(fect)
-
-# Load fect models
-out_ife     <- readRDS(file.path(MODELS_DIR, "fect_ife.rds"))
-out_mc      <- readRDS(file.path(MODELS_DIR, "fect_mc.rds"))
-out_fe      <- readRDS(file.path(MODELS_DIR, "fect_fe.rds"))
-out_placebo <- readRDS(file.path(MODELS_DIR, "fect_placebo.rds"))
-out_carry   <- readRDS(file.path(MODELS_DIR, "fect_carryover.rds"))
-out_ife_lex <- readRDS(file.path(MODELS_DIR, "fect_ife_lexicon.rds"))
-
-# Load panel
-panel <- as.data.table(read_parquet(
-  file.path(DATA_PANELS, "did_panel.parquet")
-))
-
-message("All models and data loaded.")
+library(usmap)
+library(knitr)
 ```
 
-## Figure 1: IFE ATT Dynamic Plot
+## Helper functions
 
-```{r fig-ife-att}
-pdf(file.path(FIGURES_DIR, "fig1_ife_att.pdf"), width = 8, height = 6)
-plot(out_ife, main = "ATT Estimates: Interactive Fixed Effects",
-     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
-     cex.main = 1.2, cex.lab = 1.1)
-dev.off()
-
-png(file.path(FIGURES_DIR, "fig1_ife_att.png"), width = 8, height = 6,
-    units = "in", res = 300)
-plot(out_ife, main = "ATT Estimates: Interactive Fixed Effects",
-     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
-     cex.main = 1.2, cex.lab = 1.1)
-dev.off()
-
-# Copy to Overleaf
-file.copy(file.path(FIGURES_DIR, "fig1_ife_att.pdf"),
-          file.path(OVERLEAF_FIGURES, "fig1_ife_att.pdf"), overwrite = TRUE)
-file.copy(file.path(FIGURES_DIR, "fig1_ife_att.png"),
-          file.path(OVERLEAF_FIGURES, "fig1_ife_att.png"), overwrite = TRUE)
-
-message("Figure 1 saved.")
-```
-
-## Figure 2: Placebo Test
-
-```{r fig-placebo}
-pdf(file.path(FIGURES_DIR, "fig2_placebo_test.pdf"), width = 8, height = 6)
-plot(out_placebo, main = "Placebo Test (Pre-Treatment Periods)",
-     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
-     cex.main = 1.2, cex.lab = 1.1)
-dev.off()
-
-png(file.path(FIGURES_DIR, "fig2_placebo_test.png"), width = 8, height = 6,
-    units = "in", res = 300)
-plot(out_placebo, main = "Placebo Test (Pre-Treatment Periods)",
-     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
-     cex.main = 1.2, cex.lab = 1.1)
-dev.off()
-
-file.copy(file.path(FIGURES_DIR, "fig2_placebo_test.pdf"),
-          file.path(OVERLEAF_FIGURES, "fig2_placebo_test.pdf"), overwrite = TRUE)
-file.copy(file.path(FIGURES_DIR, "fig2_placebo_test.png"),
-          file.path(OVERLEAF_FIGURES, "fig2_placebo_test.png"), overwrite = TRUE)
-
-message("Figure 2 saved.")
-```
-
-## Figure 3: Carryover Test (Persistence / Equilibrium Shift)
-
-```{r fig-carryover}
-pdf(file.path(FIGURES_DIR, "fig3_carryover_test.pdf"), width = 8, height = 6)
-plot(out_carry, main = "Carryover Test (Effect Persistence)",
-     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
-     cex.main = 1.2, cex.lab = 1.1)
-dev.off()
-
-png(file.path(FIGURES_DIR, "fig3_carryover_test.png"), width = 8, height = 6,
-    units = "in", res = 300)
-plot(out_carry, main = "Carryover Test (Effect Persistence)",
-     ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
-     cex.main = 1.2, cex.lab = 1.1)
-dev.off()
-
-file.copy(file.path(FIGURES_DIR, "fig3_carryover_test.pdf"),
-          file.path(OVERLEAF_FIGURES, "fig3_carryover_test.pdf"), overwrite = TRUE)
-file.copy(file.path(FIGURES_DIR, "fig3_carryover_test.png"),
-          file.path(OVERLEAF_FIGURES, "fig3_carryover_test.png"), overwrite = TRUE)
-
-message("Figure 3 saved.")
-```
-
-## Figure 4: Matrix Completion vs IFE Comparison
-
-```{r fig-comparison}
-pdf(file.path(FIGURES_DIR, "fig4_mc_comparison.pdf"), width = 10, height = 5)
-par(mfrow = c(1, 2))
-plot(out_ife, main = "IFE", ylab = "ATT", xlab = "Periods",
-     cex.main = 1.1, cex.lab = 1.0)
-plot(out_mc, main = "Matrix Completion", ylab = "ATT", xlab = "Periods",
-     cex.main = 1.1, cex.lab = 1.0)
-dev.off()
-
-png(file.path(FIGURES_DIR, "fig4_mc_comparison.png"), width = 10, height = 5,
-    units = "in", res = 300)
-par(mfrow = c(1, 2))
-plot(out_ife, main = "IFE", ylab = "ATT", xlab = "Periods",
-     cex.main = 1.1, cex.lab = 1.0)
-plot(out_mc, main = "Matrix Completion", ylab = "ATT", xlab = "Periods",
-     cex.main = 1.1, cex.lab = 1.0)
-dev.off()
-
-file.copy(file.path(FIGURES_DIR, "fig4_mc_comparison.pdf"),
-          file.path(OVERLEAF_FIGURES, "fig4_mc_comparison.pdf"), overwrite = TRUE)
-file.copy(file.path(FIGURES_DIR, "fig4_mc_comparison.png"),
-          file.path(OVERLEAF_FIGURES, "fig4_mc_comparison.png"), overwrite = TRUE)
-
-message("Figure 4 saved.")
-```
-
-## Figure 5: Incivility Time Series (Treated vs Control)
-
-```{r fig-timeseries}
-panel[, ever_treated := as.integer(!is.na(treat_date))]
-
-ts_data <- panel[, .(
-  incivil_treated = mean(incivil_rate_rf[ever_treated == 1], na.rm = TRUE),
-  incivil_control = mean(incivil_rate_rf[ever_treated == 0], na.rm = TRUE)
-), by = year_month]
-
-ts_data[, ym_date := as.Date(paste0(year_month, "-01"))]
-setorder(ts_data, ym_date)
-
-# Only plot study window (1920-1945) for clarity
-ts_plot_data <- ts_data[ym_date >= as.Date("1920-01-01") &
-                        ym_date <= as.Date("1945-01-01")]
-
-if (nrow(ts_plot_data) > 0) {
-  p_ts <- ggplot(ts_plot_data, aes(x = ym_date)) +
-    geom_line(aes(y = incivil_treated, color = "Treated"), alpha = 0.7) +
-    geom_line(aes(y = incivil_control, color = "Control"), alpha = 0.7) +
-    geom_vline(xintercept = as.Date("1936-01-01"),
-               linetype = "dashed", color = "gray40") +
-    annotate("text", x = as.Date("1936-06-01"), y = Inf,
-             label = "Coughlin peak", vjust = 2, size = 3) +
-    scale_color_manual(values = c("Treated" = "firebrick", "Control" = "steelblue")) +
-    labs(x = "Date", y = "Mean Incivility Rate",
-         title = "Newspaper Incivility: Treated vs Control",
-         color = "Group") +
-    theme_minimal(base_size = 12)
-
-  save_figure(p_ts, "fig5_timeseries", width = 9, height = 5)
-  print(p_ts)
-} else {
-  message("No data in 1920-1945 window for time series plot.")
+```{r helpers}
+# Extract ATT from fect models (bootstrap SE)
+extract_fect_att <- function(model) {
+  att <- as.numeric(model$att.avg)
+  se  <- sd(model$att.avg.boot)
+  list(att = att, se = se,
+       ci_lo = att - 1.96 * se, ci_hi = att + 1.96 * se,
+       p = 2 * pnorm(-abs(att / se)))
 }
+
+# Extract ATT from did_wrapper models
+extract_did_att <- function(model) {
+  avg <- model$est.avg
+  list(att = avg$ATT.avg, se = avg$S.E.,
+       ci_lo = avg$CI.lower, ci_hi = avg$CI.upper,
+       p = avg$p.value)
+}
+
+# Format a coefficient cell: "coef\n(se)"
+fmt_coef <- function(att, se) {
+  if (is.na(att)) return("")
+  paste0(sprintf("%.4f", att), "\n(", sprintf("%.4f", se), ")")
+}
+
+# Format CI
+fmt_ci <- function(lo, hi) {
+  if (is.na(lo)) return("")
+  paste0("[", sprintf("%.4f", lo), ", ", sprintf("%.4f", hi), "]")
+}
+
+# Format p-value
+fmt_p <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("$<$0.001")
+  sprintf("%.3f", p)
+}
+
+# Load newspaper-to-state mapping for maps
+np_states <- fread(file.path(DATA_PANELS, "newspaper_states.csv"), encoding = "UTF-8")
+np_states <- np_states[state != ""]
+message("Loaded ", nrow(np_states), " newspaper-state mappings.")
 ```
 
-## Figure 6: RF Variable Importance
+## Per-figure horizontal results tables
 
-This was already created in 05_random_forest.Rmd but we copy to Overleaf.
+```{r horizontal-tables}
+fect_methods <- c("ife", "mc", "fe")
+fect_labels  <- c(ife = "IFE", mc = "MC", fe = "TWFE (Imp.)")
+did_methods  <- c("cs_notyet", "iw", "didm", "twfe")
+did_labels   <- c(cs_notyet = "C\\&S", iw = "S\\&A",
+                  didm = "dCDH", twfe = "Dyn. TWFE")
 
-```{r fig-rf-importance}
-# Copy if exists
-for (ext in c("pdf", "png")) {
-  src <- file.path(FIGURES_DIR, paste0("rf_variable_importance.", ext))
-  if (file.exists(src)) {
-    file.copy(src, file.path(OVERLEAF_FIGURES,
-              paste0("fig6_rf_importance.", ext)), overwrite = TRUE)
+all_methods <- c(fect_methods, did_methods)
+all_labels  <- c(fect_labels, did_labels)
+
+# Store ATTs for cross-figure forest plot
+forest_data <- list()
+
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  message("\n", strrep("=", 60))
+  message("Building table for: ", fig$name, " (", fig_key, ")")
+  message(strrep("=", 60))
+
+  # Collect estimates for each method
+  att_vals  <- se_vals <- ci_lo_vals <- ci_hi_vals <- p_vals <- rep(NA_real_, length(all_methods))
+  names(att_vals) <- names(se_vals) <- names(ci_lo_vals) <- names(ci_hi_vals) <- names(p_vals) <- all_methods
+
+  # --- fect models ---
+  for (method in fect_methods) {
+    model_path <- file.path(MODELS_DIR, paste0("fect_", method, "_", fig_key, ".rds"))
+    if (file.exists(model_path)) {
+      m <- readRDS(model_path)
+      res <- extract_fect_att(m)
+      att_vals[method]  <- res$att
+      se_vals[method]   <- res$se
+      ci_lo_vals[method] <- res$ci_lo
+      ci_hi_vals[method] <- res$ci_hi
+      p_vals[method]    <- res$p
+      rm(m); gc()
+    }
   }
-}
-message("Figure 6 (RF importance) copied to Overleaf.")
-```
 
-## Figure 7: RF Calibration
-
-```{r fig-rf-calibration}
-for (ext in c("pdf", "png")) {
-  src <- file.path(FIGURES_DIR, paste0("rf_calibration.", ext))
-  if (file.exists(src)) {
-    file.copy(src, file.path(OVERLEAF_FIGURES,
-              paste0("fig7_rf_calibration.", ext)), overwrite = TRUE)
+  # --- did_wrapper models ---
+  for (method in did_methods) {
+    model_path <- file.path(MODELS_DIR, paste0("did_", method, "_", fig_key, ".rds"))
+    if (file.exists(model_path)) {
+      m <- readRDS(model_path)
+      res <- extract_did_att(m)
+      att_vals[method]  <- res$att
+      se_vals[method]   <- res$se
+      ci_lo_vals[method] <- res$ci_lo
+      ci_hi_vals[method] <- res$ci_hi
+      p_vals[method]    <- res$p
+      rm(m); gc()
+    }
   }
-}
-message("Figure 7 (RF calibration) copied to Overleaf.")
-```
 
-## Table: Main Results
+  # Check if any models were found
+  if (all(is.na(att_vals))) {
+    message("  No models found for ", fig$name, ", skipping table.")
+    next
+  }
 
-```{r table-main}
-# Extract ATT from each model
-extract_att <- function(model, label) {
-  att <- model$att.avg
-  se <- model$att.avg.se
-  data.table(
-    Model = label,
-    ATT = round(att, 4),
-    SE = round(se, 4),
-    `95% CI` = paste0("[", round(att - 1.96*se, 4), ", ", round(att + 1.96*se, 4), "]"),
-    `p-value` = round(2 * pnorm(-abs(att / se)), 4)
+  # Store IFE result for forest plot
+  if (!is.na(att_vals["ife"])) {
+    forest_data[[fig_key]] <- data.table(
+      figure = fig$name,
+      att    = att_vals["ife"],
+      se     = se_vals["ife"],
+      ci_lo  = ci_lo_vals["ife"],
+      ci_hi  = ci_hi_vals["ife"]
+    )
+  }
+
+  # --- Build horizontal LaTeX table ---
+  # Columns: one per method. Rows: ATT/(SE), 95% CI, p-value
+  ncols <- sum(!is.na(att_vals))
+  active_methods <- all_methods[!is.na(att_vals)]
+  active_labels  <- all_labels[active_methods]
+
+  # Build LaTeX manually for precise control
+  col_spec <- paste(rep("c", length(active_methods)), collapse = "")
+
+  tex_lines <- c(
+    "\\begin{table}[htbp]",
+    paste0("\\caption{ATT Estimates: ", fig$name, "\\label{tab:", fig_key, "-results}}"),
+    "\\centering",
+    "\\small",
+    paste0("\\begin{tabular}{l", col_spec, "}"),
+    "\\toprule",
+    paste0(" & ", paste(active_labels, collapse = " & "), " \\\\"),
+    "\\midrule"
   )
+
+  # Row 1: ATT with SE in parentheses below
+  att_cells <- sapply(active_methods, function(m) {
+    sprintf("%.4f", att_vals[m])
+  })
+  tex_lines <- c(tex_lines,
+    paste0("ATT & ", paste(att_cells, collapse = " & "), " \\\\")
+  )
+
+  # Row 2: (SE) — indented, smaller
+  se_cells <- sapply(active_methods, function(m) {
+    paste0("(", sprintf("%.4f", se_vals[m]), ")")
+  })
+  tex_lines <- c(tex_lines,
+    paste0(" & ", paste(se_cells, collapse = " & "), " \\\\")
+  )
+
+  # Row 3: 95% CI
+  ci_cells <- sapply(active_methods, function(m) {
+    paste0("[", sprintf("%.4f", ci_lo_vals[m]), ", ", sprintf("%.4f", ci_hi_vals[m]), "]")
+  })
+  tex_lines <- c(tex_lines,
+    paste0("95\\% CI & ", paste(ci_cells, collapse = " & "), " \\\\")
+  )
+
+  # Row 4: p-value
+  p_cells <- sapply(active_methods, function(m) {
+    if (p_vals[m] < 0.001) "$<$0.001" else sprintf("%.3f", p_vals[m])
+  })
+  tex_lines <- c(tex_lines,
+    paste0("$p$-value & ", paste(p_cells, collapse = " & "), " \\\\")
+  )
+
+  tex_lines <- c(tex_lines,
+    "\\bottomrule",
+    "\\end{tabular}",
+    paste0("\\\\[2pt]"),
+    paste0("\\footnotesize\\textit{Note:} Standard errors in parentheses. ",
+           "IFE = Interactive Fixed Effects; MC = Matrix Completion; ",
+           "TWFE (Imp.) = Two-Way FE (Imputation); ",
+           "C\\&S = Callaway \\& Sant'Anna; S\\&A = Sun \\& Abraham; ",
+           "dCDH = de Chaisemartin \\& D'Haultfoeuille; Dyn.\\ TWFE = Dynamic TWFE. ",
+           "Study window: ", fig$study_start, "--", fig$study_end, "."),
+    "\\end{table}"
+  )
+
+  tex_string <- paste(tex_lines, collapse = "\n")
+  save_table(tex_string, paste0("table_", fig_key, "_results"))
+  message("  Saved: table_", fig_key, "_results.tex")
+
+  # Print to console
+  cat(tex_string, "\n\n")
 }
-
-results <- rbindlist(list(
-  extract_att(out_ife, "IFE (primary)"),
-  extract_att(out_mc, "Matrix Completion"),
-  extract_att(out_fe, "Two-Way FE"),
-  extract_att(out_ife_lex, "IFE (lexicon outcome)")
-))
-
-tex <- knitr::kable(results, format = "latex", booktabs = TRUE,
-                    caption = "Estimated ATT: Effect of Coughlin Exposure on Newspaper Incivility")
-
-for (dir in c(TABLES_DIR, OVERLEAF_TABLES)) {
-  writeLines(tex, file.path(dir, "main_results.tex"))
-}
-message("Main results table saved.")
-print(results)
 ```
 
-## Table: Robustness
+## Per-figure IFE event study plots
 
-```{r table-robustness}
-# Robustness specifications
-rob_results <- rbindlist(list(
-  extract_att(out_ife, "IFE — RF outcome"),
-  extract_att(out_ife_lex, "IFE — Lexicon outcome")
-))
+```{r ife-event-studies}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  model_path <- file.path(MODELS_DIR, paste0("fect_ife_", fig_key, ".rds"))
 
-tex_rob <- knitr::kable(rob_results, format = "latex", booktabs = TRUE,
-                        caption = "Robustness: Alternative Outcome Measures")
+  if (!file.exists(model_path)) {
+    message("No IFE model for ", fig$name, ", skipping plot.")
+    next
+  }
 
-for (dir in c(TABLES_DIR, OVERLEAF_TABLES)) {
-  writeLines(tex_rob, file.path(dir, "robustness.tex"))
+  message("Generating IFE event study for: ", fig$name)
+
+  out_ife <- readRDS(model_path)
+
+  # Use fect's built-in plot (base R)
+  pdf(file.path(FIGURES_DIR, paste0("fig_ife_att_", fig_key, ".pdf")),
+      width = 8, height = 6)
+  plot(out_ife, main = paste0("ATT: ", fig$name, " (IFE)"),
+       ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+       cex.main = 1.2, cex.lab = 1.1)
+  dev.off()
+
+  png(file.path(FIGURES_DIR, paste0("fig_ife_att_", fig_key, ".png")),
+      width = 8, height = 6, units = "in", res = 300)
+  plot(out_ife, main = paste0("ATT: ", fig$name, " (IFE)"),
+       ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+       cex.main = 1.2, cex.lab = 1.1)
+  dev.off()
+
+  # Copy to Overleaf
+  for (ext in c("pdf", "png")) {
+    file.copy(file.path(FIGURES_DIR, paste0("fig_ife_att_", fig_key, ".", ext)),
+              file.path(OVERLEAF_FIGURES, paste0("fig_ife_att_", fig_key, ".", ext)),
+              overwrite = TRUE)
+  }
+
+  rm(out_ife); gc()
+  message("  Saved: fig_ife_att_", fig_key)
 }
-message("Robustness table saved.")
+```
+
+## Per-figure placebo test plots
+
+```{r placebo-plots}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  placebo_path <- file.path(MODELS_DIR, paste0("fect_placebo_", fig_key, ".rds"))
+
+  if (!file.exists(placebo_path)) {
+    message("No placebo model for ", fig$name, ", skipping.")
+    next
+  }
+
+  message("Generating placebo plot for: ", fig$name)
+
+  out_placebo <- readRDS(placebo_path)
+
+  pdf(file.path(FIGURES_DIR, paste0("fig_placebo_", fig_key, ".pdf")),
+      width = 8, height = 6)
+  plot(out_placebo, main = paste0("Placebo Test: ", fig$name),
+       ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+       cex.main = 1.2, cex.lab = 1.1)
+  dev.off()
+
+  png(file.path(FIGURES_DIR, paste0("fig_placebo_", fig_key, ".png")),
+      width = 8, height = 6, units = "in", res = 300)
+  plot(out_placebo, main = paste0("Placebo Test: ", fig$name),
+       ylab = "ATT (Incivility Rate)", xlab = "Periods Since Treatment",
+       cex.main = 1.2, cex.lab = 1.1)
+  dev.off()
+
+  for (ext in c("pdf", "png")) {
+    file.copy(file.path(FIGURES_DIR, paste0("fig_placebo_", fig_key, ".", ext)),
+              file.path(OVERLEAF_FIGURES, paste0("fig_placebo_", fig_key, ".", ext)),
+              overwrite = TRUE)
+  }
+
+  rm(out_placebo); gc()
+  message("  Saved: fig_placebo_", fig_key)
+}
+```
+
+## Per-figure C&S event study plots
+
+```{r cs-event-studies}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  cs_path <- file.path(MODELS_DIR, paste0("did_cs_notyet_", fig_key, ".rds"))
+
+  if (!file.exists(cs_path)) {
+    message("No C&S model for ", fig$name, ", skipping.")
+    next
+  }
+
+  message("Generating C&S event study for: ", fig$name)
+
+  res_cs <- readRDS(cs_path)
+  cs_att <- tryCatch({
+    dt <- as.data.table(res_cs$est.att)
+    dt[, period := as.integer(rownames(res_cs$est.att))]
+    dt[period >= -24 & period <= 24]
+  }, error = function(e) {
+    message("  Could not extract C&S event study: ", e$message)
+    NULL
+  })
+
+  if (!is.null(cs_att) && nrow(cs_att) > 0) {
+    p_cs <- ggplot(cs_att, aes(x = period, y = ATT)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+      geom_vline(xintercept = -0.5, linetype = "dotted", color = "gray40") +
+      geom_ribbon(aes(ymin = CI.lower, ymax = CI.upper),
+                  alpha = 0.2, fill = "steelblue") +
+      geom_line(color = "steelblue") +
+      geom_point(size = 1.5, color = "steelblue") +
+      labs(x = "Periods Relative to Treatment",
+           y = "ATT (Incivility Rate)",
+           title = paste0("Event Study (C&S): ", fig$name)) +
+      theme_minimal(base_size = 12) +
+      theme(plot.title = element_text(face = "bold"))
+
+    save_figure(p_cs, paste0("fig_cs_eventstudy_", fig_key), width = 9, height = 5)
+    message("  Saved: fig_cs_eventstudy_", fig_key)
+  }
+
+  rm(res_cs); gc()
+}
+```
+
+## Per-figure coverage intensity maps
+
+```{r coverage-maps}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  panel_path <- file.path(DATA_PANELS, paste0("did_panel_", fig_key, ".parquet"))
+
+  if (!file.exists(panel_path)) {
+    message("No panel for ", fig$name, ", skipping map.")
+    next
+  }
+
+  message("Generating coverage map for: ", fig$name)
+
+  panel <- as.data.table(read_parquet(panel_path))
+
+  # Per-newspaper coverage info
+  np_info <- panel[, .(
+    ever_treated = max(as.integer(!is.na(treat_date)), na.rm = TRUE),
+    total_figure_articles = sum(figure_count, na.rm = TRUE)
+  ), by = newspaper_name]
+
+  # Merge with state mapping
+  np_info <- merge(np_info, np_states[, .(newspaper_name, state)],
+                   by = "newspaper_name", all.x = TRUE)
+
+  # Fuzzy match for unmatched
+  unmatched <- np_info[is.na(state)]
+  if (nrow(unmatched) > 0) {
+    for (i in seq_len(nrow(unmatched))) {
+      short_nm <- unmatched$newspaper_name[i]
+      matches <- np_states[startsWith(newspaper_name, short_nm)]
+      if (nrow(matches) > 0) {
+        np_info[newspaper_name == short_nm, state := matches$state[1]]
+      }
+    }
+  }
+
+  # State-level summary
+  state_summary <- np_info[!is.na(state), .(
+    n_treated = sum(ever_treated == 1),
+    n_control = sum(ever_treated == 0),
+    total_articles = sum(total_figure_articles[ever_treated == 1])
+  ), by = state]
+
+  state_summary[, intensity := fifelse(
+    total_articles == 0, "None",
+    fifelse(total_articles <= 25, "Low (1\u201325)",
+    fifelse(total_articles <= 75, "Medium (26\u201375)",
+            "High (76+)"))
+  )]
+  state_summary[, intensity := factor(intensity,
+    levels = c("None", "Low (1\u201325)", "Medium (26\u201375)", "High (76+)")
+  )]
+
+  p_map <- plot_usmap(
+    data = state_summary, values = "intensity",
+    regions = "states", labels = FALSE
+  ) +
+    scale_fill_manual(
+      values = c("None" = "grey90",
+                 "Low (1\u201325)" = "#FFCDD2",
+                 "Medium (26\u201375)" = "#E53935",
+                 "High (76+)" = "#B71C1C"),
+      na.value = "grey90",
+      name = paste0(fig$name, "\nArticles")
+    ) +
+    labs(title = paste0("Coverage Intensity: ", fig$name),
+         subtitle = paste0("Study window: ", fig$study_start, "\u2013", fig$study_end)) +
+    theme(
+      legend.position = "right",
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray30"),
+      legend.text = element_text(size = 10),
+      legend.title = element_text(size = 11)
+    )
+
+  save_figure(p_map, paste0("fig_coverage_map_", fig_key), width = 10, height = 6)
+  message("  Saved: fig_coverage_map_", fig_key)
+
+  rm(panel, np_info, state_summary); gc()
+}
+```
+
+## Per-figure incivility time series (treated vs control)
+
+```{r timeseries-plots}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  panel_path <- file.path(DATA_PANELS, paste0("did_panel_", fig_key, ".parquet"))
+
+  if (!file.exists(panel_path)) {
+    message("No panel for ", fig$name, ", skipping time series.")
+    next
+  }
+
+  message("Generating time series for: ", fig$name)
+
+  panel <- as.data.table(read_parquet(panel_path))
+  panel[, ever_treated := as.integer(!is.na(treat_date))]
+
+  ts_data <- panel[, .(
+    incivil_treated = mean(incivil_rate_rf[ever_treated == 1], na.rm = TRUE),
+    incivil_control = mean(incivil_rate_rf[ever_treated == 0], na.rm = TRUE)
+  ), by = year_month]
+
+  ts_data[, ym_date := as.Date(paste0(year_month, "-01"))]
+  setorder(ts_data, ym_date)
+
+  # Use figure's study window for plot range
+  ts_plot_data <- ts_data[
+    ym_date >= as.Date(paste0(fig$study_start, "-01-01")) &
+    ym_date <= as.Date(paste0(fig$study_end, "-12-31"))
+  ]
+
+  if (nrow(ts_plot_data) > 0) {
+    p_ts <- ggplot(ts_plot_data, aes(x = ym_date)) +
+      geom_line(aes(y = incivil_treated, color = "Treated"), alpha = 0.7) +
+      geom_line(aes(y = incivil_control, color = "Control"), alpha = 0.7) +
+      scale_color_manual(values = c("Treated" = "firebrick", "Control" = "steelblue")) +
+      labs(x = "Date", y = "Mean Incivility Rate",
+           title = paste0("Incivility: Treated vs Control — ", fig$name),
+           color = "Group") +
+      theme_minimal(base_size = 12) +
+      theme(plot.title = element_text(face = "bold"))
+
+    save_figure(p_ts, paste0("fig_timeseries_", fig_key), width = 9, height = 5)
+    message("  Saved: fig_timeseries_", fig_key)
+  }
+
+  rm(panel, ts_data); gc()
+}
+```
+
+## RF model figures (copy to Overleaf)
+
+```{r rf-figures}
+# These are generated in 05_random_forest.Rmd; just copy to Overleaf
+for (fig_name in c("rf_variable_importance", "rf_calibration")) {
+  for (ext in c("pdf", "png")) {
+    src <- file.path(FIGURES_DIR, paste0(fig_name, ".", ext))
+    if (file.exists(src)) {
+      file.copy(src, file.path(OVERLEAF_FIGURES, paste0(fig_name, ".", ext)),
+                overwrite = TRUE)
+    }
+  }
+}
+message("RF model figures copied to Overleaf.")
+```
+
+## Cross-figure ATT forest plot
+
+```{r forest-plot}
+if (length(forest_data) > 0) {
+  forest_dt <- rbindlist(forest_data)
+  forest_dt[, figure := factor(figure, levels = rev(figure))]
+
+  p_forest <- ggplot(forest_dt, aes(x = att, y = figure)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_point(size = 3, color = "firebrick") +
+    geom_errorbarh(aes(xmin = ci_lo, xmax = ci_hi), height = 0.25,
+                   color = "firebrick") +
+    labs(x = "ATT (IFE Estimator)",
+         y = NULL,
+         title = "ATT Comparison Across Political Figures",
+         subtitle = "Interactive Fixed Effects estimator with 95% CI") +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "gray40"),
+      axis.text.y = element_text(size = 11)
+    )
+
+  save_figure(p_forest, "fig_forest_att_comparison", width = 10, height = 7)
+  print(p_forest)
+  message("Cross-figure forest plot saved.")
+} else {
+  message("No IFE models found — forest plot skipped.")
+}
+```
+
+## Cross-figure summary table
+
+```{r cross-figure-table}
+if (length(forest_data) > 0) {
+  summary_dt <- rbindlist(forest_data)
+
+  # Add p-values
+  summary_dt[, p_value := 2 * pnorm(-abs(att / se))]
+  summary_dt[, `:=`(
+    ATT     = sprintf("%.4f", att),
+    SE      = sprintf("%.4f", se),
+    CI      = paste0("[", sprintf("%.4f", ci_lo), ", ", sprintf("%.4f", ci_hi), "]"),
+    p       = ifelse(p_value < 0.001, "$<$0.001", sprintf("%.3f", p_value))
+  )]
+
+  tex_lines <- c(
+    "\\begin{table}[htbp]",
+    "\\caption{IFE ATT Estimates Across All Political Figures\\label{tab:cross-figure}}",
+    "\\centering",
+    "\\begin{tabular}{lcccc}",
+    "\\toprule",
+    "Figure & ATT & SE & 95\\% CI & $p$-value \\\\",
+    "\\midrule"
+  )
+
+  for (i in seq_len(nrow(summary_dt))) {
+    tex_lines <- c(tex_lines,
+      paste0(summary_dt$figure[i], " & ",
+             summary_dt$ATT[i], " & ",
+             summary_dt$SE[i], " & ",
+             summary_dt$CI[i], " & ",
+             summary_dt$p[i], " \\\\")
+    )
+  }
+
+  tex_lines <- c(tex_lines,
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\\\[2pt]",
+    "\\footnotesize\\textit{Note:} ATT estimated via Interactive Fixed Effects (IFE) ",
+    "with bootstrap standard errors (200 replications).",
+    "\\end{table}"
+  )
+
+  tex_string <- paste(tex_lines, collapse = "\n")
+  save_table(tex_string, "table_cross_figure_ife")
+  message("Cross-figure IFE summary table saved.")
+  cat(tex_string, "\n")
+} else {
+  message("No IFE models found — cross-figure table skipped.")
+}
+```
+
+## Aggregate incivility over time — national, regional, and state-level
+
+```{r load-all-rf-scored}
+# Load all RF-scored articles and compute yearly incivility by newspaper
+rf_scored_dir <- file.path(DATA_PANELS, "rf_scored")
+rf_files <- list.files(rf_scored_dir, pattern = "\\.parquet$", full.names = TRUE)
+
+if (length(rf_files) > 0) {
+  message("Loading ", length(rf_files), " RF-scored year files for aggregate plots...")
+
+  yearly_np <- list()
+  for (rf_f in rf_files) {
+    yr <- gsub(".*rf_scored_(\\d{4})\\.parquet", "\\1", rf_f)
+    dt_yr <- as.data.table(read_parquet(rf_f,
+      col_select = c("newspaper_name", "year", "p_incivil")))
+    # Aggregate to newspaper x year
+    agg <- dt_yr[, .(
+      mean_incivil = mean(p_incivil, na.rm = TRUE),
+      n_articles = .N
+    ), by = .(newspaper_name, year)]
+    yearly_np[[yr]] <- agg
+    rm(dt_yr, agg); gc()
+  }
+
+  np_year <- rbindlist(yearly_np)
+  rm(yearly_np); gc()
+  message("Aggregate data: ", nrow(np_year), " newspaper-year observations, ",
+          uniqueN(np_year$newspaper_name), " newspapers, ",
+          uniqueN(np_year$year), " years")
+
+  # Merge with state mapping
+  np_year <- merge(np_year, np_states[, .(newspaper_name, state)],
+                   by = "newspaper_name", all.x = TRUE)
+
+  # Fuzzy match for unmatched
+  unmatched_agg <- np_year[is.na(state), unique(newspaper_name)]
+  if (length(unmatched_agg) > 0) {
+    for (short_nm in unmatched_agg) {
+      matches <- np_states[startsWith(newspaper_name, short_nm)]
+      if (nrow(matches) > 0) {
+        np_year[newspaper_name == short_nm, state := matches$state[1]]
+      }
+    }
+  }
+
+  message("Newspapers with state match: ",
+          uniqueN(np_year[!is.na(state), newspaper_name]), " / ",
+          uniqueN(np_year$newspaper_name))
+
+  # Define Census regions
+  np_year[, region := fcase(
+    state %in% c("CT","ME","MA","NH","RI","VT","NJ","NY","PA"), "Northeast",
+    state %in% c("IL","IN","IA","KS","MI","MN","MO","NE","ND","OH","SD","WI"), "Midwest",
+    state %in% c("AL","AR","DE","FL","GA","KY","LA","MD","MS","NC","OK","SC",
+                 "TN","TX","VA","WV","DC"), "South",
+    state %in% c("AZ","CO","ID","MT","NV","NM","OR","UT","WA","WY","CA","AK","HI"), "West",
+    default = NA_character_
+  )]
+} else {
+  message("No RF-scored files found — skipping aggregate incivility plots.")
+  np_year <- NULL
+}
+```
+
+### Figure: National incivility trend
+
+```{r fig-national-incivility}
+if (!is.null(np_year) && nrow(np_year) > 0) {
+  # Weighted mean incivility per year (weighted by article count)
+  national <- np_year[, .(
+    mean_incivil = weighted.mean(mean_incivil, n_articles, na.rm = TRUE),
+    n_newspapers = uniqueN(newspaper_name),
+    n_articles = sum(n_articles)
+  ), by = year]
+  setorder(national, year)
+
+  p_national <- ggplot(national, aes(x = year, y = mean_incivil)) +
+    geom_line(color = "firebrick", linewidth = 0.8) +
+    geom_smooth(method = "loess", span = 0.15, se = TRUE,
+                color = "gray30", fill = "gray80", alpha = 0.3) +
+    labs(x = "Year", y = "Mean Incivility (RF Score)",
+         title = "Newspaper Incivility in the United States, 1774\u20131960",
+         subtitle = "Article-weighted annual average across all newspapers") +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "gray40")
+    )
+
+  save_figure(p_national, "fig_national_incivility_trend", width = 10, height = 6)
+  print(p_national)
+  message("National incivility trend saved.")
+}
+```
+
+### Figure: Incivility by Census region over time
+
+```{r fig-regional-incivility}
+if (!is.null(np_year) && nrow(np_year[!is.na(region)]) > 0) {
+  regional <- np_year[!is.na(region), .(
+    mean_incivil = weighted.mean(mean_incivil, n_articles, na.rm = TRUE),
+    n_newspapers = uniqueN(newspaper_name),
+    n_articles = sum(n_articles)
+  ), by = .(year, region)]
+  setorder(regional, region, year)
+
+  # Filter to regions with reasonable coverage (at least 3 newspapers in a year)
+  regional <- regional[n_newspapers >= 3]
+
+  p_region <- ggplot(regional, aes(x = year, y = mean_incivil, color = region)) +
+    geom_line(alpha = 0.4, linewidth = 0.4) +
+    geom_smooth(method = "loess", span = 0.2, se = FALSE, linewidth = 1) +
+    scale_color_manual(values = c(
+      "Northeast" = "#1b9e77",
+      "Midwest"   = "#d95f02",
+      "South"     = "#7570b3",
+      "West"      = "#e7298a"
+    )) +
+    labs(x = "Year", y = "Mean Incivility (RF Score)",
+         title = "Newspaper Incivility by U.S. Census Region",
+         subtitle = "Smoothed trends; regions with \u22653 newspapers per year",
+         color = "Region") +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "gray40"),
+      legend.position = "bottom"
+    )
+
+  save_figure(p_region, "fig_regional_incivility_trend", width = 10, height = 6)
+  print(p_region)
+  message("Regional incivility trend saved.")
+}
+```
+
+### Figure: Incivility by state over time
+
+```{r fig-state-incivility, fig.width=12, fig.height=10}
+if (!is.null(np_year) && nrow(np_year[!is.na(state)]) > 0) {
+  state_year <- np_year[!is.na(state), .(
+    mean_incivil = weighted.mean(mean_incivil, n_articles, na.rm = TRUE),
+    n_newspapers = uniqueN(newspaper_name),
+    n_articles = sum(n_articles)
+  ), by = .(year, state, region)]
+  setorder(state_year, state, year)
+
+  # Keep only states with at least 10 years of data and at least 2 newspapers on avg
+  state_coverage <- state_year[, .(
+    n_years = uniqueN(year),
+    avg_np = mean(n_newspapers)
+  ), by = state]
+  keep_states <- state_coverage[n_years >= 10 & avg_np >= 2, state]
+  state_plot <- state_year[state %in% keep_states]
+
+  message("States with sufficient coverage: ", length(keep_states),
+          " out of ", uniqueN(state_year$state))
+
+  if (nrow(state_plot) > 0) {
+    # Add region for faceting color
+    state_plot[, region := fcase(
+      state %in% c("CT","ME","MA","NH","RI","VT","NJ","NY","PA"), "Northeast",
+      state %in% c("IL","IN","IA","KS","MI","MN","MO","NE","ND","OH","SD","WI"), "Midwest",
+      state %in% c("AL","AR","DE","FL","GA","KY","LA","MD","MS","NC","OK","SC",
+                   "TN","TX","VA","WV","DC"), "South",
+      state %in% c("AZ","CO","ID","MT","NV","NM","OR","UT","WA","WY","CA","AK","HI"), "West",
+      default = "Other"
+    )]
+
+    p_state <- ggplot(state_plot, aes(x = year, y = mean_incivil,
+                                       color = region, group = state)) +
+      geom_line(alpha = 0.6, linewidth = 0.5) +
+      facet_wrap(~ state, scales = "free_y", ncol = 6) +
+      scale_color_manual(values = c(
+        "Northeast" = "#1b9e77",
+        "Midwest"   = "#d95f02",
+        "South"     = "#7570b3",
+        "West"      = "#e7298a",
+        "Other"     = "gray50"
+      )) +
+      labs(x = "Year", y = "Incivility",
+           title = "Newspaper Incivility by State",
+           subtitle = "States with \u226510 years of data and \u22652 newspapers on average",
+           color = "Region") +
+      theme_minimal(base_size = 9) +
+      theme(
+        plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray40", size = 10),
+        strip.text = element_text(face = "bold", size = 8),
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
+        axis.text.y = element_text(size = 6),
+        legend.position = "bottom",
+        panel.spacing = unit(0.3, "lines")
+      )
+
+    save_figure(p_state, "fig_state_incivility_trend", width = 14, height = 10)
+    print(p_state)
+    message("State-level incivility trend saved.")
+  }
+}
+```
+
+## Export: newspaper-level incivility summary CSV
+
+```{r newspaper-csv}
+if (!is.null(np_year) && nrow(np_year) > 0) {
+  newspaper_summary <- np_year[, .(
+    state          = state[1],
+    region         = region[1],
+    first_year     = min(year),
+    last_year      = max(year),
+    n_years        = uniqueN(year),
+    total_articles = sum(n_articles),
+    mean_incivil   = round(weighted.mean(mean_incivil, n_articles, na.rm = TRUE), 6),
+    sd_incivil     = round(sd(rep(mean_incivil, n_articles), na.rm = TRUE), 6),
+    min_incivil    = round(min(mean_incivil, na.rm = TRUE), 6),
+    max_incivil    = round(max(mean_incivil, na.rm = TRUE), 6)
+  ), by = newspaper_name]
+
+  setorder(newspaper_summary, -mean_incivil)
+
+  csv_path <- file.path(DATA_PANELS, "newspaper_incivility_summary.csv")
+  write.csv(newspaper_summary, csv_path, row.names = FALSE)
+  message("Saved newspaper summary: ", csv_path,
+          " (", nrow(newspaper_summary), " newspapers)")
+
+  # Quick stats
+  message("  Mean incivility across newspapers: ",
+          round(mean(newspaper_summary$mean_incivil, na.rm = TRUE), 4))
+  message("  Most incivil: ", newspaper_summary$newspaper_name[1],
+          " (", newspaper_summary$mean_incivil[1], ")")
+  message("  Least incivil: ", newspaper_summary$newspaper_name[nrow(newspaper_summary)],
+          " (", newspaper_summary$mean_incivil[nrow(newspaper_summary)], ")")
+}
 ```
 
 ## Final file listing
 
 ```{r file-listing}
 message("\n=== Files in Overleaf Figures ===")
-cat(list.files(OVERLEAF_FIGURES), sep = "\n")
+cat(paste(list.files(OVERLEAF_FIGURES), collapse = "\n"), "\n")
 
 message("\n=== Files in Overleaf Tables ===")
-cat(list.files(OVERLEAF_TABLES), sep = "\n")
+cat(paste(list.files(OVERLEAF_TABLES), collapse = "\n"), "\n")
+
+message("\n=== Files in local figures/ ===")
+cat(paste(list.files(FIGURES_DIR), collapse = "\n"), "\n")
+
+message("\n=== Files in local tables/ ===")
+cat(paste(list.files(TABLES_DIR), collapse = "\n"), "\n")
 
 message("\nAll figures and tables exported successfully.")
 ```

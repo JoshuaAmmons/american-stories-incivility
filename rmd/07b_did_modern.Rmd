@@ -1,0 +1,126 @@
+---
+title: "07b — Modern DiD Estimators (Multi-Figure)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+```{r libraries}
+library(arrow)
+library(data.table)
+library(fect)
+```
+
+## Run modern DiD estimators for each figure
+
+```{r estimate-all}
+did_methods <- c("cs_notyet", "iw", "didm", "twfe")
+did_labels  <- c(cs_notyet = "Callaway & Sant'Anna",
+                 iw        = "Sun & Abraham",
+                 didm      = "de Chaisemartin & D'Haultfoeuille",
+                 twfe      = "Dynamic TWFE")
+
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  panel_path <- file.path(DATA_PANELS, paste0("did_panel_", fig_key, ".parquet"))
+
+  if (!file.exists(panel_path)) {
+    message("Panel not found for ", fig$name, ", skipping.")
+    next
+  }
+
+  message("\n", strrep("=", 60))
+  message("Modern DiD estimation for: ", fig$name, " (", fig_key, ")")
+  message(strrep("=", 60))
+
+  panel <- as.data.table(read_parquet(panel_path))
+  message("Panel: ", nrow(panel), " rows, ",
+          uniqueN(panel$newspaper_id), " newspapers")
+
+  # --- Fit did_wrapper models ---
+  for (method in did_methods) {
+    model_path <- file.path(MODELS_DIR, paste0("did_", method, "_", fig_key, ".rds"))
+
+    if (file.exists(model_path)) {
+      message("  ", did_labels[method], " model already exists, skipping.")
+      next
+    }
+
+    message("  Fitting ", did_labels[method], " ...")
+    out <- tryCatch({
+      extra_args <- list(
+        data   = as.data.frame(panel),
+        Y      = "incivil_rate_rf",
+        D      = "treated",
+        index  = c("newspaper_id", "time_id"),
+        method = method
+      )
+      # Add extra args for de Chaisemartin & D'Haultfoeuille
+      if (method == "didm") {
+        extra_args$didm.effects <- 6
+        extra_args$didm.placebo <- 3
+      }
+      do.call(did_wrapper, extra_args)
+    }, error = function(e) {
+      message("    ERROR: ", e$message)
+      NULL
+    })
+
+    if (!is.null(out)) {
+      saveRDS(out, model_path)
+      avg <- out$est.avg
+      message("    ATT = ", round(avg$ATT.avg, 4),
+              ", SE = ", round(avg$S.E., 4))
+    }
+
+    rm(out); gc()
+  }
+
+  rm(panel); gc()
+}
+
+message("\n\nAll modern DiD models complete.")
+```
+
+## Results summary
+
+```{r results-summary}
+# Extract ATT from did_wrapper objects
+extract_did_att <- function(model, label) {
+  avg <- model$est.avg
+  data.table(
+    Model    = label,
+    ATT      = round(avg$ATT.avg, 4),
+    SE       = round(avg$S.E., 4),
+    CI_lower = round(avg$CI.lower, 4),
+    CI_upper = round(avg$CI.upper, 4),
+    p_value  = round(avg$p.value, 4)
+  )
+}
+
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  message("\n--- ", fig$name, " ---")
+
+  results_list <- list()
+  for (method in did_methods) {
+    model_path <- file.path(MODELS_DIR, paste0("did_", method, "_", fig_key, ".rds"))
+    if (file.exists(model_path)) {
+      m <- readRDS(model_path)
+      results_list[[method]] <- extract_did_att(m, did_labels[method])
+      rm(m); gc()
+    }
+  }
+
+  if (length(results_list) > 0) {
+    results <- rbindlist(results_list)
+    print(results)
+  } else {
+    message("  No models found.")
+  }
+}
+```

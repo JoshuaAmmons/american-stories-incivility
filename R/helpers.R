@@ -32,10 +32,28 @@ lexicon_score <- function(text, lexicon, ignore_case = TRUE) {
 #' Simple isotonic calibration
 #' Fits isotonic regression on (predicted, actual) and returns a calibration function
 fit_isotonic <- function(predicted, actual) {
+  # Remove NAs
+  keep <- !is.na(predicted) & !is.na(actual)
+  predicted <- predicted[keep]
+  actual <- actual[keep]
+
   ord <- order(predicted)
   iso_fit <- isoreg(predicted[ord], actual[ord])
+
+  # Deduplicate x values for approx (average yf at duplicate x)
+  fit_df <- data.frame(x = iso_fit$x, y = iso_fit$yf)
+  fit_df <- aggregate(y ~ x, data = fit_df, FUN = mean)
+  fit_df <- fit_df[order(fit_df$x), ]
+
+  if (nrow(fit_df) < 2) {
+    # Degenerate case: return identity or constant
+    const_val <- mean(actual)
+    message("Warning: isotonic calibration degenerate, using constant = ", round(const_val, 4))
+    return(function(new_pred) rep(const_val, length(new_pred)))
+  }
+
   function(new_pred) {
-    approx(iso_fit$x, iso_fit$yf, xout = new_pred, rule = 2)$y
+    approx(fit_df$x, fit_df$y, xout = new_pred, rule = 2)$y
   }
 }
 

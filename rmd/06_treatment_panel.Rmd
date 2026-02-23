@@ -1,5 +1,5 @@
 ---
-title: "06 — Treatment Panel: Coughlin Exposure"
+title: "06 — Treatment Panels: Multi-Figure"
 output: html_document
 ---
 
@@ -23,182 +23,207 @@ scored_files <- list.files(rf_scored_dir, pattern = "\\.parquet$", full.names = 
 message("Found ", length(scored_files), " scored year files")
 
 # Load all scored articles
-dt <- rbindlist(lapply(scored_files, read_parquet), fill = TRUE)
-message("Total articles: ", nrow(dt))
+dt_all <- rbindlist(lapply(scored_files, read_parquet), fill = TRUE)
+message("Total articles: ", nrow(dt_all))
+message("Year range: ", min(dt_all$year, na.rm = TRUE), "-",
+        max(dt_all$year, na.rm = TRUE))
 ```
 
-## Identify Coughlin-related articles
+## Load article text for keyword matching
 
-```{r coughlin-flag}
-coughlin_pattern <- regex(
-  paste0("\\b(",
-         paste(c("coughlin", "father coughlin",
-                 "social justice",  # his publication
-                 "national union for social justice",
-                 "union party"),
-               collapse = "|"),
-         ")\\b"),
-  ignore_case = TRUE
-)
-
-# We need the article text for this — reload from scored data
+```{r load-text}
 scored_dir_text <- file.path(DATA_PARQUET, "articles_scored")
 scored_text_files <- list.files(scored_dir_text, pattern = "\\.parquet$",
                                 full.names = TRUE)
-
-# Process year by year to flag Coughlin mentions
-message("Flagging Coughlin mentions...")
-coughlin_flags <- list()
-
-for (sf in scored_text_files) {
-  yr <- gsub(".*scored_(\\d{4})\\.parquet", "\\1", sf)
-  dt_yr <- as.data.table(read_parquet(sf, col_select = c("article_id", "article")))
-  dt_yr[, is_coughlin := as.integer(str_detect(tolower(article), coughlin_pattern))]
-  coughlin_flags[[yr]] <- dt_yr[, .(article_id, is_coughlin)]
-  rm(dt_yr)
-}
-
-coughlin_df <- rbindlist(coughlin_flags)
-message("Coughlin-mentioning articles: ", sum(coughlin_df$is_coughlin))
-
-# Merge flag into main data
-dt <- merge(dt, coughlin_df, by = "article_id", all.x = TRUE)
-dt[is.na(is_coughlin), is_coughlin := 0L]
+message("Found ", length(scored_text_files), " scored text files")
 ```
 
-## Build newspaper × month panel
+## Build panels for each figure
 
-```{r panel}
-# Parse year_month to date for ordering
-dt[, ym_date := as.Date(paste0(year_month, "-01"))]
-dt[, time_id := as.integer(difftime(ym_date, as.Date("1774-01-01"), units = "days") / 30)]
+```{r build-panels}
+# Helper: build a treatment panel for one figure
+build_figure_panel <- function(fig_key, fig_config, dt, text_files) {
+  message("\n", strrep("=", 60))
+  message("Building panel for: ", fig_config$name, " (", fig_key, ")")
+  message(strrep("=", 60))
 
-# Newspaper-month panel
-panel <- dt[, .(
-  # Outcomes: incivility excluding Coughlin articles
-  incivil_rate_rf = mean(p_incivil[is_coughlin == 0], na.rm = TRUE),
-  incivil_rate_lexicon = mean(uncivil_score[is_coughlin == 0], na.rm = TRUE),
+  outpath <- file.path(DATA_PANELS, paste0("did_panel_", fig_key, ".parquet"))
+  if (file.exists(outpath)) {
+    message("Panel already exists, skipping. Delete to rebuild.")
+    return(invisible(NULL))
+  }
 
-  # Coughlin exposure measures
-  coughlin_count = sum(is_coughlin),
-  coughlin_share = mean(is_coughlin),
-  coughlin_front_page = sum(is_coughlin * front_page, na.rm = TRUE),
+  # --- Step 1: Flag figure-related articles ---
+  pattern <- regex(
+    paste0("\\b(", paste(fig_config$keywords, collapse = "|"), ")\\b"),
+    ignore_case = TRUE
+  )
 
-  # Controls
-  n_articles = .N,
-  n_articles_non_coughlin = sum(is_coughlin == 0),
-  mean_words = mean(n_words, na.rm = TRUE),
-  mean_ocr = mean(ocr_quality, na.rm = TRUE),
-  front_page_share = mean(front_page, na.rm = TRUE)
-), by = .(newspaper_name, year_month, ym_date, time_id)]
+  message("Flagging articles matching: ", paste(fig_config$keywords, collapse = " | "))
 
-# Sort
-setorder(panel, newspaper_name, ym_date)
+  figure_flags <- list()
+  for (sf in text_files) {
+    yr <- as.integer(gsub(".*scored_(\\d{4})\\.parquet", "\\1", sf))
 
-message("Panel dimensions: ", nrow(panel), " newspaper-months")
-message("Unique newspapers: ", uniqueN(panel$newspaper_name))
-message("Time range: ", min(panel$ym_date), " to ", max(panel$ym_date))
-```
+    # Apply year guardrail to avoid false positives
+    if (yr < fig_config$min_year) next
 
-## Define treatment: sustained Coughlin coverage
+    dt_yr <- as.data.table(read_parquet(sf, col_select = c("article_id", "article")))
+    dt_yr[, is_figure := as.integer(str_detect(tolower(article), pattern))]
+    figure_flags[[as.character(yr)]] <- dt_yr[, .(article_id, is_figure)]
+    rm(dt_yr)
+  }
 
-```{r treatment}
-# A newspaper is "treated" if it has sustained Coughlin coverage:
-# >= 2 Coughlin articles in >= 2 of 3 consecutive months
+  figure_df <- rbindlist(figure_flags)
+  message("  Figure-mentioning articles: ", sum(figure_df$is_figure))
 
-panel[, sustained := {
-  n <- .N
-  flag <- rep(0L, n)
-  if (n >= 3) {
-    for (i in 1:(n - 2)) {
-      months_with <- sum(coughlin_count[i:(i+2)] >= 2)
-      if (months_with >= 2) {
-        flag[i] <- 1L
-        break  # first occurrence
+  if (sum(figure_df$is_figure) == 0) {
+    message("  WARNING: No articles found for ", fig_config$name, ". Skipping.")
+    return(invisible(NULL))
+  }
+
+  # Merge flag into article data
+  dt_fig <- copy(dt)
+  dt_fig <- merge(dt_fig, figure_df, by = "article_id", all.x = TRUE)
+  dt_fig[is.na(is_figure), is_figure := 0L]
+
+  # Filter to study window
+  study_years <- fig_config$study_start:fig_config$study_end
+  dt_fig <- dt_fig[year %in% study_years]
+  message("  Articles in study window (", fig_config$study_start, "-",
+          fig_config$study_end, "): ", nrow(dt_fig))
+
+  if (nrow(dt_fig) == 0) {
+    message("  WARNING: No articles in study window. Skipping.")
+    return(invisible(NULL))
+  }
+
+  # --- Step 2: Build newspaper x month panel ---
+  dt_fig[, ym_date := as.Date(paste0(year_month, "-01"))]
+  dt_fig[, time_id := (as.integer(format(ym_date, "%Y")) - 1774L) * 12L +
+                       as.integer(format(ym_date, "%m"))]
+
+  panel <- dt_fig[, .(
+    incivil_rate_rf = mean(p_incivil[is_figure == 0], na.rm = TRUE),
+    incivil_rate_lexicon = mean(uncivil_score[is_figure == 0], na.rm = TRUE),
+    figure_count = sum(is_figure),
+    figure_share = mean(is_figure),
+    n_articles = .N,
+    n_articles_non_figure = sum(is_figure == 0),
+    mean_words = mean(n_words, na.rm = TRUE),
+    mean_ocr = mean(ocr_quality, na.rm = TRUE),
+    front_page_share = mean(front_page, na.rm = TRUE)
+  ), by = .(newspaper_name, year_month, ym_date, time_id)]
+
+  setorder(panel, newspaper_name, ym_date)
+
+  # --- Step 3: Define treatment (sustained coverage) ---
+  # Treated if >= 2 figure articles in >= 2 of 3 consecutive months
+  panel[, sustained := {
+    n <- .N
+    flag <- rep(0L, n)
+    if (n >= 3) {
+      for (i in 1:(n - 2)) {
+        months_with <- sum(figure_count[i:(i+2)] >= 2)
+        if (months_with >= 2) {
+          flag[i] <- 1L
+          break
+        }
       }
     }
+    flag
+  }, by = newspaper_name]
+
+  treat_info <- panel[sustained == 1,
+                      .(treat_date = min(ym_date), treat_time_id = min(time_id)),
+                      by = newspaper_name]
+
+  panel <- merge(panel, treat_info, by = "newspaper_name", all.x = TRUE)
+  panel[, treated := as.integer(!is.na(treat_date) & ym_date >= treat_date)]
+  panel[is.na(treated), treated := 0L]
+  panel[, treat_cohort := fifelse(!is.na(treat_time_id), treat_time_id, 0L)]
+  panel[, newspaper_id := as.integer(factor(newspaper_name))]
+
+  # --- Step 4: Filter ---
+  # Keep newspapers with at least 12 months of observations
+  np_counts <- panel[, .N, by = newspaper_name]
+  keep_nps <- np_counts[N >= 12, newspaper_name]
+  panel <- panel[newspaper_name %in% keep_nps]
+
+  # Keep newspaper-months with at least 5 non-figure articles
+  panel <- panel[n_articles_non_figure >= 5]
+
+  # Drop helper columns
+  panel[, c("sustained", "ym_date") := NULL]
+
+  # --- Summary ---
+  n_treated <- uniqueN(panel[treated == 1, newspaper_name])
+  n_control <- uniqueN(panel[is.na(treat_date), newspaper_name])
+  message("  Panel: ", nrow(panel), " newspaper-months, ",
+          uniqueN(panel$newspaper_name), " newspapers")
+  message("  Treated: ", n_treated, " newspapers, ",
+          sum(panel$treated), " newspaper-months")
+  message("  Never-treated: ", n_control, " newspapers")
+
+  if (n_treated == 0) {
+    message("  WARNING: No treated newspapers found. Panel not saved.")
+    return(invisible(NULL))
   }
-  flag
-}, by = newspaper_name]
 
-# Treatment date = first month of sustained coverage
-treat_info <- panel[sustained == 1,
-                    .(treat_date = min(ym_date), treat_time_id = min(time_id)),
-                    by = newspaper_name]
+  # --- Save ---
+  write_parquet(panel, outpath)
+  message("  Saved: ", outpath)
 
-panel <- merge(panel, treat_info, by = "newspaper_name", all.x = TRUE)
+  # Also save CSV for inspection
+  write.csv(panel, file.path(DATA_PANELS, paste0("did_panel_", fig_key, ".csv")),
+            row.names = FALSE)
 
-# Binary treatment indicator: 1 if after treatment date
-panel[, treated := as.integer(!is.na(treat_date) & ym_date >= treat_date)]
-panel[is.na(treated), treated := 0L]
+  return(invisible(panel))
+}
 
-# Treatment cohort (for fect)
-panel[, treat_cohort := fifelse(!is.na(treat_time_id), treat_time_id, 0L)]
+# Build panels for all figures
+for (fig_key in names(FIGURES)) {
+  tryCatch(
+    build_figure_panel(fig_key, FIGURES[[fig_key]], dt_all, scored_text_files),
+    error = function(e) {
+      message("ERROR building panel for ", fig_key, ": ", e$message)
+    }
+  )
+  gc()
+}
 
-# Numeric newspaper ID
-panel[, newspaper_id := as.integer(factor(newspaper_name))]
-
-message("\nTreatment summary:")
-message("  Treated newspapers: ", uniqueN(panel[treated == 1, newspaper_name]))
-message("  Never-treated newspapers: ",
-        uniqueN(panel[is.na(treat_date), newspaper_name]))
-message("  Treated newspaper-months: ", sum(panel$treated))
-message("  Control newspaper-months: ", sum(panel$treated == 0))
+message("\n\nAll panels built.")
 ```
 
-## Filter to balanced-ish panel
+## Panel summary
 
-```{r filter}
-# Keep newspapers with at least 12 months of observations
-np_counts <- panel[, .N, by = newspaper_name]
-keep_nps <- np_counts[N >= 12, newspaper_name]
-panel <- panel[newspaper_name %in% keep_nps]
+```{r summary}
+panel_files <- list.files(DATA_PANELS, pattern = "^did_panel_.*\\.parquet$",
+                          full.names = TRUE)
+message("Panel files found: ", length(panel_files))
 
-# Keep newspaper-months with at least 5 articles
-panel <- panel[n_articles_non_coughlin >= 5]
+for (pf in panel_files) {
+  fig_key <- gsub(".*did_panel_(.*)\\.parquet", "\\1", pf)
+  fig_name <- if (fig_key %in% names(FIGURES)) FIGURES[[fig_key]]$name else fig_key
+  p <- as.data.table(read_parquet(pf))
 
-message("\nFiltered panel:")
-message("  Newspapers: ", uniqueN(panel$newspaper_name))
-message("  Newspaper-months: ", nrow(panel))
-message("  Treated: ", uniqueN(panel[treated == 1, newspaper_name]), " newspapers, ",
-        sum(panel$treated), " newspaper-months")
+  p[, ever_treated := as.integer(!is.na(treat_date))]
 
-# Drop helper columns
-panel[, c("sustained", "ym_date") := NULL]
-```
+  summary_by_group <- p[, .(
+    `N newspaper-months` = .N,
+    `N newspapers` = uniqueN(newspaper_name),
+    `Mean incivility (RF)` = round(mean(incivil_rate_rf, na.rm = TRUE), 3),
+    `Mean incivility (lexicon)` = round(mean(incivil_rate_lexicon, na.rm = TRUE), 3),
+    `Mean figure count` = round(mean(figure_count), 2),
+    `Mean articles/month` = round(mean(n_articles), 1)
+  ), by = .(Group = fifelse(ever_treated == 1, "Treated", "Never Treated"))]
 
-## Save panel
+  tex <- knitr::kable(summary_by_group, format = "latex", booktabs = TRUE,
+                      caption = paste0("Summary Statistics: ", fig_name))
+  save_table(tex, paste0("summary_stats_", fig_key))
+  message("Saved summary table for ", fig_name)
 
-```{r save}
-outpath <- file.path(DATA_PANELS, "did_panel.parquet")
-write_parquet(panel, outpath)
-message("Saved DiD panel: ", outpath)
-
-# Also save as CSV for inspection
-write.csv(panel, file.path(DATA_PANELS, "did_panel.csv"), row.names = FALSE)
-message("Saved CSV copy for inspection.")
-```
-
-## Panel summary table
-
-```{r summary-table}
-library(modelsummary)
-
-# Summary stats by treatment status
-panel[, ever_treated := as.integer(!is.na(treat_date))]
-
-summary_by_group <- panel[, .(
-  `N newspaper-months` = .N,
-  `N newspapers` = uniqueN(newspaper_name),
-  `Mean incivility (RF)` = round(mean(incivil_rate_rf, na.rm = TRUE), 3),
-  `Mean incivility (lexicon)` = round(mean(incivil_rate_lexicon, na.rm = TRUE), 3),
-  `Mean Coughlin count` = round(mean(coughlin_count), 2),
-  `Mean articles/month` = round(mean(n_articles), 1),
-  `Mean OCR quality` = round(mean(mean_ocr, na.rm = TRUE), 3)
-), by = .(Group = fifelse(ever_treated == 1, "Treated", "Never Treated"))]
-
-tex <- knitr::kable(summary_by_group, format = "latex", booktabs = TRUE,
-                    caption = "Summary Statistics by Treatment Group")
-save_table(tex, "summary_statistics")
-message("Saved summary statistics table.")
+  rm(p)
+  gc()
+}
 ```
