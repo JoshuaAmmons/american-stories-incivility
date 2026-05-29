@@ -35,8 +35,16 @@ for (fig_key in names(FIGURES)) {
   message(strrep("=", 60))
 
   panel <- as.data.table(read_parquet(panel_path))
+  n_treated_units <- uniqueN(panel[!is.na(treat_date), newspaper_id])
+  n_control_units <- uniqueN(panel[is.na(treat_date), newspaper_id])
   message("Panel: ", nrow(panel), " rows, ",
-          uniqueN(panel$newspaper_id), " newspapers")
+          uniqueN(panel$newspaper_id), " newspapers (",
+          n_treated_units, " treated, ", n_control_units, " never-treated)")
+
+  if (n_treated_units < 3) {
+    message("  WARNING: Only ", n_treated_units, " treated units — fect may fail. Skipping.")
+    next
+  }
 
   # --- Fit fect models ---
   for (method in fect_methods) {
@@ -69,8 +77,11 @@ for (fig_key in names(FIGURES)) {
 
     if (!is.null(out)) {
       saveRDS(out, model_path)
+      boot_se <- if (!is.null(out$att.avg.boot) && length(out$att.avg.boot) > 1) {
+        sd(out$att.avg.boot)
+      } else NA_real_
       message("    ATT = ", round(out$att.avg, 4),
-              ", SE = ", round(sd(out$att.avg.boot), 4))
+              ", SE = ", round(boot_se, 4))
     }
 
     rm(out); gc()
@@ -154,7 +165,12 @@ message("\n\nAll fect models complete.")
 # Extract ATT from fect models (bootstrap SE)
 extract_att <- function(model, label) {
   att <- as.numeric(model$att.avg)
-  se  <- sd(model$att.avg.boot)
+  # Defensive: check that bootstrap output exists before computing SE
+  se <- if (!is.null(model$att.avg.boot) && length(model$att.avg.boot) > 1) {
+    sd(model$att.avg.boot)
+  } else {
+    NA_real_
+  }
   data.table(
     Model = label,
     ATT = round(att, 4),

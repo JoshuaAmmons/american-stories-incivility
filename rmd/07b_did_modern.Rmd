@@ -12,7 +12,9 @@ source("C:/Users/ammonsj/Ideas/_config.R")
 ```{r libraries}
 library(arrow)
 library(data.table)
-library(fect)
+
+# Load the did_wrapper function (provides unified interface for modern DiD)
+source(file.path(PROJECT_ROOT, "R", "did_wrapper.R"))
 ```
 
 ## Run modern DiD estimators for each figure

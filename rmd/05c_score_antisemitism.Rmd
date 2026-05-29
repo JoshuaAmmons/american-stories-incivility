@@ -1,0 +1,142 @@
+---
+title: "05c — Score Full Corpus with RoBERTa Antisemitism Classifier"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Prerequisites check
+
+```{r check-prereqs}
+model_dir <- file.path(MODELS_DIR, "roberta_antisemitism")
+
+# Check model exists
+if (!file.exists(file.path(model_dir, "model.safetensors")) &&
+    !file.exists(file.path(model_dir, "pytorch_model.bin"))) {
+  stop("RoBERTa model not found. Run step 05b first: ", model_dir)
+}
+
+# Check antisemitism-scored articles exist
+input_dir <- file.path(DATA_PARQUET, "articles_antisem_scored")
+input_files <- list.files(input_dir, pattern = "\\.parquet$")
+message("Input files: ", length(input_files), " year files")
+
+if (length(input_files) == 0) {
+  stop("No antisemitism-scored articles found. Run step 03b first.")
+}
+```
+
+## GPU verification
+
+```{r gpu-check}
+library(reticulate)
+use_python(PYTHON_EXE, required = TRUE)
+
+py_run_string("
+import torch
+if torch.cuda.is_available():
+    print(f'CUDA available: {torch.cuda.get_device_name(0)}')
+    mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f'VRAM: {mem_gb:.1f} GB')
+    # Adjust batch size based on VRAM
+    if mem_gb >= 16:
+        batch_size = 64
+    elif mem_gb >= 10:
+        batch_size = 32
+    else:
+        batch_size = 16
+    print(f'Recommended inference batch size: {batch_size}')
+else:
+    print('WARNING: No GPU. CPU inference will be very slow.')
+    batch_size = 8
+")
+```
+
+## Score corpus
+
+```{r score}
+dir.create(ROBERTA_SCORED_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# Check how many are already done
+already_done <- list.files(ROBERTA_SCORED_DIR, pattern = "\\.parquet$")
+message("Already scored: ", length(already_done), " year files")
+message("Remaining: ", length(input_files) - length(already_done))
+
+if (length(already_done) >= length(input_files)) {
+  message("All years already scored. Delete output files to re-score.")
+} else {
+  message("Starting corpus scoring with RoBERTa...")
+  message("Estimated time: 1.5-3 hours on GPU")
+
+  source_python(file.path(PROJECT_ROOT, "R", "score_roberta.py"))
+  n_scored <- score_corpus(model_dir, input_dir, ROBERTA_SCORED_DIR)
+
+  message("\nScored ", n_scored, " articles total.")
+}
+```
+
+## Score distribution summary
+
+```{r summary}
+library(arrow)
+library(data.table)
+
+scored_files <- list.files(ROBERTA_SCORED_DIR, pattern = "\\.parquet$",
+                           full.names = TRUE)
+
+if (length(scored_files) > 0) {
+  ds <- open_dataset(scored_files)
+
+  score_summary <- ds |>
+    dplyr::summarise(
+      n_articles = n(),
+      mean_p_antisem = mean(p_antisem, na.rm = TRUE),
+      sd_p_antisem = sd(p_antisem, na.rm = TRUE),
+      median_p_antisem = median(p_antisem, na.rm = TRUE),
+      share_above_50 = mean(p_antisem > 0.5, na.rm = TRUE),
+      share_above_75 = mean(p_antisem > 0.75, na.rm = TRUE),
+      p90 = quantile(p_antisem, 0.90, na.rm = TRUE),
+      p99 = quantile(p_antisem, 0.99, na.rm = TRUE)
+    ) |>
+    dplyr::collect()
+
+  print(score_summary)
+
+  # By decade
+  decade_scores <- ds |>
+    dplyr::mutate(decade = as.integer(year / 10) * 10L) |>
+    dplyr::group_by(decade) |>
+    dplyr::summarise(
+      n = n(),
+      mean_p = mean(p_antisem, na.rm = TRUE),
+      share_above_50 = mean(p_antisem > 0.5, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::collect() |>
+    dplyr::arrange(decade)
+
+  print(decade_scores)
+
+  # Histogram
+  library(ggplot2)
+  sample_scores <- ds |>
+    dplyr::select(p_antisem) |>
+    dplyr::collect()
+
+  p_hist <- ggplot(sample_scores, aes(x = p_antisem)) +
+    geom_histogram(bins = 100, fill = "steelblue", color = "white", alpha = 0.8) +
+    scale_y_log10() +
+    labs(x = "P(Antisemitic)", y = "Count (log scale)",
+         title = "Distribution of RoBERTa Antisemitism Scores") +
+    theme_minimal(base_size = 12)
+
+  save_figure(p_hist, "fig_antisem_score_distribution", width = 8, height = 5)
+  print(p_hist)
+} else {
+  message("No scored files found.")
+}
+```

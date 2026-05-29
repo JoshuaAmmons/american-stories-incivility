@@ -1,0 +1,163 @@
+---
+title: "03b — Antisemitism Seed Lexicon and Score Articles"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+source("C:/Users/ammonsj/Ideas/R/helpers.R")
+```
+
+## Antisemitism seed lexicon
+
+This lexicon is used **only** to stratify the labeling sample for RoBERTa
+fine-tuning. The final antisemitism classifier is RoBERTa Large, not lexicon-based.
+
+```{r lexicon}
+# Print lexicon categories
+for (cat_name in names(ANTISEM_LEXICON)) {
+  cat(cat_name, ":\n  ", paste(ANTISEM_LEXICON[[cat_name]], collapse = ", "), "\n\n")
+}
+
+message("Total unique seed terms: ", length(ANTISEM_TERMS_ALL))
+```
+
+## Score all articles
+
+```{r score}
+library(arrow)
+library(data.table)
+library(parallel)
+
+scored_dir <- file.path(DATA_PARQUET, "articles_scored")
+antisem_dir <- file.path(DATA_PARQUET, "articles_antisem_scored")
+dir.create(antisem_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Save lexicon for reproducibility
+saveRDS(ANTISEM_LEXICON, file.path(MODELS_DIR, "antisem_lexicon.rds"))
+
+# Identify files still needing scoring
+scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRUE)
+n_total <- length(scored_files)
+
+todo_files <- scored_files[!sapply(scored_files, function(sf) {
+  yr <- gsub(".*scored_(\\d{4})\\.parquet", "\\1", sf)
+  file.exists(file.path(antisem_dir, paste0("antisem_scored_", yr, ".parquet")))
+})]
+
+message(n_total - length(todo_files), " / ", n_total, " years already done. ",
+        length(todo_files), " remaining.")
+
+if (length(todo_files) > 0) {
+  # Progress log directory
+  progress_dir <- file.path(antisem_dir, ".progress")
+  dir.create(progress_dir, recursive = TRUE, showWarnings = FALSE)
+
+  # Worker function: self-contained, loads its own libraries
+  score_one_year <- function(sf, antisem_dir, lexicon, terms_all, helpers_path) {
+    library(arrow)
+    library(data.table)
+    source(helpers_path)
+
+    yr <- gsub(".*scored_(\\d{4})\\.parquet", "\\1", sf)
+    outpath <- file.path(antisem_dir, paste0("antisem_scored_", yr, ".parquet"))
+    prog_file <- file.path(antisem_dir, ".progress", paste0(yr, ".txt"))
+
+    # Double-check in case another worker finished it
+    if (file.exists(outpath)) return(paste0("Year ", yr, ": already exists, skipped"))
+
+    # Progress: loading
+    writeLines(paste0("LOADING ", Sys.time()), prog_file)
+
+    t0 <- Sys.time()
+    dt <- as.data.table(read_parquet(sf))
+    n_rows <- nrow(dt)
+
+    # Progress: scoring
+    writeLines(paste0("SCORING ", format(n_rows, big.mark=","), " articles  started ", Sys.time()), prog_file)
+
+    # Overall antisemitism score
+    dt[, antisem_score := lexicon_score(article, terms_all)]
+
+    # Progress: sub-categories
+    n_cats <- length(lexicon)
+    for (i in seq_along(lexicon)) {
+      cat_name <- names(lexicon)[i]
+      col_name <- paste0("antisem_", cat_name, "_score")
+      dt[, (col_name) := lexicon_score(article, lexicon[[cat_name]])]
+      writeLines(paste0("SCORING category ", i, "/", n_cats, " (", cat_name, ")  ",
+                        round(as.numeric(difftime(Sys.time(), t0, units="mins")),1), " min"), prog_file)
+    }
+
+    # Progress: writing
+    writeLines(paste0("WRITING ", Sys.time()), prog_file)
+    write_parquet(dt, outpath)
+    rm(dt); gc()
+
+    elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
+    writeLines(paste0("DONE ", format(n_rows, big.mark=","), " articles in ", elapsed, " min"), prog_file)
+    paste0("Year ", yr, ": ", format(n_rows, big.mark = ","),
+           " articles in ", elapsed, " min")
+  }
+
+  # Use 3 parallel workers (~30-40 GB each fits in 128 GB with headroom)
+  N_WORKERS <- 3L
+  message("Starting ", N_WORKERS, " parallel workers for ", length(todo_files), " files...")
+  t_start_all <- Sys.time()
+
+  cl <- makeCluster(N_WORKERS)
+  results <- parLapply(cl, todo_files, score_one_year,
+                       antisem_dir = antisem_dir,
+                       lexicon = ANTISEM_LEXICON,
+                       terms_all = ANTISEM_TERMS_ALL,
+                       helpers_path = "C:/Users/ammonsj/Ideas/R/helpers.R")
+  stopCluster(cl)
+
+  # Print results
+  for (r in results) message(r)
+
+  message("\nAll years complete. Total wall time: ",
+          round(as.numeric(difftime(Sys.time(), t_start_all, units = "mins")), 1), " min")
+} else {
+  message("Nothing to do — all years already scored.")
+}
+```
+
+## Summary statistics
+
+```{r summary}
+library(dplyr)
+
+antisem_files <- list.files(antisem_dir, pattern = "\\.parquet$", full.names = TRUE)
+ds <- open_dataset(antisem_files)
+
+score_summary <- ds |>
+  summarise(
+    n_articles = n(),
+    mean_antisem = mean(antisem_score, na.rm = TRUE),
+    sd_antisem = sd(antisem_score, na.rm = TRUE),
+    p90_antisem = quantile(antisem_score, 0.90, na.rm = TRUE),
+    p99_antisem = quantile(antisem_score, 0.99, na.rm = TRUE),
+    share_any_antisem = mean(antisem_score > 0, na.rm = TRUE)
+  ) |>
+  collect()
+
+print(score_summary)
+
+# Score distribution by decade
+decade_scores <- ds |>
+  mutate(decade = as.integer(year / 10) * 10L) |>
+  group_by(decade) |>
+  summarise(
+    n = n(),
+    mean_score = mean(antisem_score, na.rm = TRUE),
+    share_any = mean(antisem_score > 0, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  collect() |>
+  arrange(decade)
+
+print(decade_scores)
+```

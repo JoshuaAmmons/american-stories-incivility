@@ -1,0 +1,392 @@
+---
+title: "08b — Publication Figures and Tables: Antisemitism (Multi-Figure)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE,
+                      fig.width = 8, fig.height = 6, dpi = 300)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+```{r libraries}
+library(data.table)
+library(arrow)
+library(ggplot2)
+library(patchwork)
+library(fect)
+library(knitr)
+```
+
+## Helper functions
+
+```{r helpers}
+# Reuse helpers from step 08
+extract_fect_att <- function(model) {
+  att <- as.numeric(model$att.avg)
+  se <- if (!is.null(model$att.avg.boot) && length(model$att.avg.boot) > 1) {
+    sd(model$att.avg.boot)
+  } else NA_real_
+  list(att = att, se = se,
+       ci_lo = att - 1.96 * se, ci_hi = att + 1.96 * se,
+       p = 2 * pnorm(-abs(att / se)))
+}
+
+extract_did_att <- function(model) {
+  avg <- model$est.avg
+  if (is.null(avg)) return(list(att = NA_real_, se = NA_real_,
+                                 ci_lo = NA_real_, ci_hi = NA_real_, p = NA_real_))
+  null_to_na <- function(x) if (is.null(x)) NA_real_ else x
+  list(att = null_to_na(avg$ATT.avg), se = null_to_na(avg$S.E.),
+       ci_lo = null_to_na(avg$CI.lower), ci_hi = null_to_na(avg$CI.upper),
+       p = null_to_na(avg$p.value))
+}
+
+sig_stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) return("$^{***}$")
+  if (p < 0.01) return("$^{**}$")
+  if (p < 0.05) return("$^{*}$")
+  return("")
+}
+
+# Newspaper-to-state mapping (optional)
+np_states_path <- file.path(DATA_PANELS, "newspaper_states.csv")
+HAS_NP_STATES <- file.exists(np_states_path)
+if (HAS_NP_STATES) {
+  np_states <- fread(np_states_path, encoding = "UTF-8")
+  np_states <- np_states[state != ""]
+}
+```
+
+## Per-figure results tables
+
+```{r horizontal-tables}
+forest_data_antisem <- list()
+
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+
+  panel_path <- file.path(DATA_PANELS, paste0("did_panel_antisem_", fig_key, ".parquet"))
+  if (!file.exists(panel_path)) next
+
+  message("\n", strrep("=", 60))
+  message("Building antisemitism table for: ", fig$name)
+  message(strrep("=", 60))
+
+  panel <- as.data.table(read_parquet(panel_path))
+  n_obs <- nrow(panel)
+  n_units <- uniqueN(panel$newspaper_id)
+  n_treated_units <- uniqueN(panel[!is.na(treat_date), newspaper_id])
+  n_control_units <- n_units - n_treated_units
+
+  # Collect estimates from 3 models: TWFE(Imp.), MC, C&S
+  model_specs <- list(
+    fe = list(
+      file = paste0("fect_fe_antisem_", fig_key, ".rds"),
+      label = "TWFE (Imp.)", type = "fect"
+    ),
+    mc = list(
+      file = paste0("fect_mc_antisem_", fig_key, ".rds"),
+      label = "MC", type = "fect"
+    ),
+    cs = list(
+      file = paste0("did_cs_notyet_antisem_", fig_key, ".rds"),
+      label = "C\\&S", type = "did"
+    )
+  )
+
+  att_vals <- se_vals <- ci_lo_vals <- ci_hi_vals <- p_vals <- rep(NA_real_, 3)
+  names(att_vals) <- names(se_vals) <- names(ci_lo_vals) <-
+    names(ci_hi_vals) <- names(p_vals) <- names(model_specs)
+
+  for (mkey in names(model_specs)) {
+    spec <- model_specs[[mkey]]
+    mpath <- file.path(MODELS_DIR, spec$file)
+    if (!file.exists(mpath)) next
+
+    m <- readRDS(mpath)
+    res <- if (spec$type == "fect") extract_fect_att(m) else extract_did_att(m)
+    att_vals[mkey]  <- res$att
+    se_vals[mkey]   <- res$se
+    ci_lo_vals[mkey] <- res$ci_lo
+    ci_hi_vals[mkey] <- res$ci_hi
+    p_vals[mkey]    <- res$p
+    rm(m); gc()
+  }
+
+  if (all(is.na(att_vals))) {
+    message("  No models found, skipping table.")
+    rm(panel); gc()
+    next
+  }
+
+  # Store MC result for forest plot
+  forest_key <- if (!is.na(att_vals["mc"])) "mc" else "fe"
+  if (!is.na(att_vals[forest_key])) {
+    forest_data_antisem[[fig_key]] <- data.table(
+      figure = fig$name,
+      att    = att_vals[forest_key],
+      se     = se_vals[forest_key],
+      ci_lo  = ci_lo_vals[forest_key],
+      ci_hi  = ci_hi_vals[forest_key]
+    )
+  }
+
+  # Build LaTeX table
+  active <- !is.na(att_vals)
+  active_keys <- names(model_specs)[active]
+  active_labels <- sapply(model_specs[active_keys], `[[`, "label")
+  ncols <- sum(active)
+  col_spec <- paste(rep("c", ncols), collapse = "")
+
+  tex_lines <- c(
+    "\\begin{table}[htbp]",
+    paste0("\\caption{Antisemitism ATT: ", fig$name,
+           "\\label{tab:", fig_key, "-antisem}}"),
+    "\\centering", "\\small",
+    paste0("\\begin{tabular}{l", col_spec, "}"),
+    "\\toprule",
+    paste0(" & ", paste(active_labels, collapse = " & "), " \\\\"),
+    "\\midrule"
+  )
+
+  att_cells <- sapply(active_keys, function(k) {
+    paste0(sprintf("%.4f", att_vals[k]), sig_stars(p_vals[k]))
+  })
+  tex_lines <- c(tex_lines,
+    paste0("ATT & ", paste(att_cells, collapse = " & "), " \\\\"))
+
+  se_cells <- sapply(active_keys, function(k) {
+    paste0("(", sprintf("%.4f", se_vals[k]), ")")
+  })
+  tex_lines <- c(tex_lines,
+    paste0(" & ", paste(se_cells, collapse = " & "), " \\\\"))
+
+  ci_cells <- sapply(active_keys, function(k) {
+    paste0("[", sprintf("%.4f", ci_lo_vals[k]), ", ", sprintf("%.4f", ci_hi_vals[k]), "]")
+  })
+  tex_lines <- c(tex_lines,
+    paste0("95\\% CI & ", paste(ci_cells, collapse = " & "), " \\\\"),
+    "\\midrule")
+
+  obs_cells <- rep(formatC(n_obs, format = "d", big.mark = ","), ncols)
+  tex_lines <- c(tex_lines,
+    paste0("Observations & ", paste(obs_cells, collapse = " & "), " \\\\"))
+
+  treat_cells <- rep(formatC(n_treated_units, format = "d", big.mark = ","), ncols)
+  tex_lines <- c(tex_lines,
+    paste0("Treated & ", paste(treat_cells, collapse = " & "), " \\\\"))
+
+  control_cells <- rep(formatC(n_control_units, format = "d", big.mark = ","), ncols)
+  tex_lines <- c(tex_lines,
+    paste0("Never-treated & ", paste(control_cells, collapse = " & "), " \\\\"))
+
+  tex_lines <- c(tex_lines,
+    "\\bottomrule", "\\end{tabular}",
+    "\\\\[2pt]",
+    paste0("\\footnotesize\\textit{Note:} ",
+           "$^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$. ",
+           "Outcome: RoBERTa antisemitism probability (non-figure articles). ",
+           "Study window: ", fig$study_start, "--", fig$study_end, "."),
+    "\\end{table}"
+  )
+
+  tex_string <- paste(tex_lines, collapse = "\n")
+  save_table(tex_string, paste0("table_antisem_", fig_key, "_results"))
+  message("  Saved table: table_antisem_", fig_key, "_results.tex")
+
+  rm(panel); gc()
+}
+```
+
+## Per-figure IFE event study plots
+
+```{r ife-event-studies}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  model_path <- file.path(MODELS_DIR, paste0("fect_ife_antisem_", fig_key, ".rds"))
+
+  if (!file.exists(model_path)) next
+
+  message("Generating antisemitism IFE event study for: ", fig$name)
+
+  out_ife <- readRDS(model_path)
+  p_ife <- plot(out_ife,
+    main = paste0("ATT (Antisemitism): ", fig$name, " (IFE)"),
+    ylab = "ATT (Antisemitism Rate)", xlab = "Periods Since Treatment",
+    cex.main = 1.2, cex.lab = 1.1)
+  save_figure(p_ife, paste0("fig_ife_att_antisem_", fig_key), width = 8, height = 6)
+
+  rm(out_ife); gc()
+}
+```
+
+## Per-figure placebo plots
+
+```{r placebo-plots}
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  placebo_path <- file.path(MODELS_DIR, paste0("fect_placebo_antisem_", fig_key, ".rds"))
+
+  if (!file.exists(placebo_path)) next
+
+  message("Generating antisemitism placebo plot for: ", fig$name)
+
+  out_placebo <- readRDS(placebo_path)
+  p_placebo <- plot(out_placebo,
+    main = paste0("Placebo Test (Antisemitism): ", fig$name),
+    ylab = "ATT (Antisemitism Rate)", xlab = "Periods Since Treatment",
+    cex.main = 1.2, cex.lab = 1.1)
+  save_figure(p_placebo, paste0("fig_placebo_antisem_", fig_key), width = 8, height = 6)
+
+  rm(out_placebo); gc()
+}
+```
+
+## Cross-figure ATT forest plot (antisemitism)
+
+```{r forest-plot}
+if (length(forest_data_antisem) > 0) {
+  forest_dt <- rbindlist(forest_data_antisem)
+  forest_dt[, figure := factor(figure, levels = rev(figure))]
+
+  plot_height <- max(7, nrow(forest_dt) * 0.5 + 2)
+
+  p_forest <- ggplot(forest_dt, aes(x = att, y = figure)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_point(size = 3, color = "darkgreen") +
+    geom_errorbarh(aes(xmin = ci_lo, xmax = ci_hi), height = 0.25,
+                   color = "darkgreen") +
+    labs(x = "ATT (Antisemitism, MC Estimator)",
+         y = NULL,
+         title = "Antisemitism ATT Across Political Figures",
+         subtitle = "Matrix Completion estimator with 95% CI") +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "gray40"),
+      axis.text.y = element_text(size = 10)
+    )
+
+  save_figure(p_forest, "fig_forest_antisem_comparison", width = 10, height = plot_height)
+  print(p_forest)
+  message("Antisemitism forest plot saved.")
+}
+```
+
+## Cross-figure summary table
+
+```{r cross-figure-table}
+if (length(forest_data_antisem) > 0) {
+  summary_dt <- rbindlist(forest_data_antisem)
+  summary_dt[, p_value := 2 * pnorm(-abs(att / se))]
+  summary_dt[, `:=`(
+    ATT = sprintf("%.4f", att),
+    SE  = sprintf("%.4f", se),
+    CI  = paste0("[", sprintf("%.4f", ci_lo), ", ", sprintf("%.4f", ci_hi), "]"),
+    p   = ifelse(p_value < 0.001, "$<$0.001", sprintf("%.3f", p_value))
+  )]
+
+  tex_lines <- c(
+    "\\begin{table}[htbp]",
+    "\\caption{Antisemitism ATT Across Political Figures\\label{tab:cross-figure-antisem}}",
+    "\\centering",
+    "\\begin{tabular}{lcccc}",
+    "\\toprule",
+    "Figure & ATT & SE & 95\\% CI & $p$-value \\\\",
+    "\\midrule"
+  )
+
+  for (i in seq_len(nrow(summary_dt))) {
+    tex_lines <- c(tex_lines,
+      paste0(summary_dt$figure[i], " & ",
+             summary_dt$ATT[i], " & ",
+             summary_dt$SE[i], " & ",
+             summary_dt$CI[i], " & ",
+             summary_dt$p[i], " \\\\")
+    )
+  }
+
+  tex_lines <- c(tex_lines,
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\vspace{2pt}",
+    "\\footnotesize\\textit{Note:} ATT estimated via Matrix Completion. ",
+    "Outcome: RoBERTa antisemitism probability in non-figure articles. ",
+    "Bootstrap standard errors (200 replications).",
+    "\\end{table}"
+  )
+
+  tex_string <- paste(tex_lines, collapse = "\n")
+  save_table(tex_string, "table_cross_figure_antisem")
+  message("Cross-figure antisemitism summary table saved.")
+}
+```
+
+## National antisemitism trend
+
+```{r national-trend}
+roberta_files <- list.files(ROBERTA_SCORED_DIR, pattern = "\\.parquet$",
+                            full.names = TRUE)
+
+if (length(roberta_files) > 0) {
+  message("Loading ", length(roberta_files), " RoBERTa-scored files for trends...")
+
+  yearly_np <- list()
+  for (rf_f in roberta_files) {
+    yr <- gsub(".*roberta_scored_(\\d{4})\\.parquet", "\\1", rf_f)
+    dt_yr <- as.data.table(read_parquet(rf_f,
+      col_select = c("newspaper_name", "year", "p_antisem")))
+    agg <- dt_yr[, .(
+      mean_antisem = mean(p_antisem, na.rm = TRUE),
+      n_articles = .N
+    ), by = .(newspaper_name, year)]
+    yearly_np[[yr]] <- agg
+    rm(dt_yr, agg); gc()
+  }
+
+  np_year <- rbindlist(yearly_np)
+  rm(yearly_np); gc()
+
+  national <- np_year[, .(
+    mean_antisem = weighted.mean(mean_antisem, n_articles, na.rm = TRUE),
+    n_newspapers = uniqueN(newspaper_name),
+    n_articles = sum(n_articles)
+  ), by = year]
+  national <- national[is.finite(mean_antisem)]
+  setorder(national, year)
+
+  p_national <- ggplot(national, aes(x = year, y = mean_antisem)) +
+    geom_line(color = "darkgreen", linewidth = 0.8) +
+    geom_smooth(method = "loess", span = 0.15, se = TRUE,
+                color = "gray30", fill = "gray80", alpha = 0.3) +
+    labs(x = "Year", y = "Mean Antisemitism (RoBERTa Score)",
+         title = "Newspaper Antisemitism in the United States, 1774\u20131960",
+         subtitle = "Article-weighted annual average across all newspapers") +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(color = "gray40")
+    )
+
+  save_figure(p_national, "fig_national_antisemitism_trend", width = 10, height = 6)
+  print(p_national)
+  message("National antisemitism trend saved.")
+}
+```
+
+## File listing
+
+```{r file-listing}
+message("\n=== Antisemitism Files in Overleaf Figures ===")
+antisem_figs <- list.files(OVERLEAF_FIGURES, pattern = "antisem")
+cat(paste(antisem_figs, collapse = "\n"), "\n")
+
+message("\n=== Antisemitism Files in Overleaf Tables ===")
+antisem_tabs <- list.files(OVERLEAF_TABLES, pattern = "antisem")
+cat(paste(antisem_tabs, collapse = "\n"), "\n")
+
+message("\nAntisemitism figures and tables exported.")
+```

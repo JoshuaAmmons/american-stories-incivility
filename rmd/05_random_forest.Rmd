@@ -54,8 +54,12 @@ message("Loaded ", nrow(feature_df), " articles with ",
 #   Uncivil (1): articles with score above the 75th percentile of non-zero scores
 #   Excluded (NA): articles with low positive scores (ambiguous)
 
-nonzero_scores <- feature_df$uncivil_score[feature_df$uncivil_score > 0]
-q75_nonzero <- quantile(nonzero_scores, 0.75, na.rm = TRUE)
+nonzero_scores <- feature_df$uncivil_score[feature_df$uncivil_score > 0 &
+                                            !is.na(feature_df$uncivil_score)]
+if (length(nonzero_scores) == 0) {
+  stop("No articles have positive uncivil_score. Check lexicon scoring in step 03.")
+}
+q75_nonzero <- quantile(nonzero_scores, 0.75)
 
 message("Score distribution: ",
         sum(feature_df$uncivil_score == 0), " zero, ",
@@ -158,7 +162,7 @@ for (k in 1:5) {
     probability = TRUE,
     importance = "impurity",
     seed = SEED,
-    num.threads = 2L
+    num.threads = max(2L, parallel::detectCores() - 4L)  # use most cores for training
   )
 
   # Predict on test
@@ -195,9 +199,18 @@ for (k in 1:5) {
 }
 
 cv_summary <- rbindlist(cv_results)
+
+# Warn about degenerate folds instead of silently dropping
+n_na_folds <- sum(is.na(cv_summary$auc))
+if (n_na_folds > 0) {
+  warning("CV: ", n_na_folds, " of 5 folds had NA AUC (single-class fold). ",
+          "Check stratification. Reporting mean over ", 5 - n_na_folds, " valid folds.")
+}
+
 message("\n=== CV Summary ===")
 message("Mean AUC: ", round(mean(cv_summary$auc, na.rm = TRUE), 4),
-        " (SD: ", round(sd(cv_summary$auc, na.rm = TRUE), 4), ")")
+        " (SD: ", round(sd(cv_summary$auc, na.rm = TRUE), 4), ")",
+        if (n_na_folds > 0) paste0(" [WARNING: ", n_na_folds, " NA folds excluded]") else "")
 message("Mean Brier: ", round(mean(cv_summary$brier, na.rm = TRUE), 4))
 ```
 
@@ -260,7 +273,7 @@ if (file.exists(model_path) && file.exists(cal_path) && file.exists(fcols_path))
     probability = TRUE,
     importance = "impurity",
     seed = SEED,
-    num.threads = 2L
+    num.threads = max(2L, parallel::detectCores() - 4L)  # use most cores for final model
   )
 
   # Save model
@@ -273,31 +286,84 @@ if (file.exists(model_path) && file.exists(cal_path) && file.exists(fcols_path))
 
 ## Variable importance
 
-```{r importance, eval=!model_exists}
+```{r importance}
+# Load model if not already in memory (e.g., when model_exists was TRUE)
+if (!exists("rf_final")) {
+  rf_final <- readRDS(file.path(MODELS_DIR, "rf_incivility_model.rds"))
+}
+
 imp <- data.table(
   feature = names(rf_final$variable.importance),
   importance = rf_final$variable.importance
 )
 imp <- imp[order(-importance)][1:20]
 
-p_imp <- ggplot(imp, aes(x = reorder(feature, importance), y = importance)) +
+# Hand-curated English labels based on top-loading words per SVD component
+# (see inspect_svd.R for derivation)
+label_map <- c(
+  "n_words"     = "Article Length (word count)",
+  "ocr_quality" = "OCR Quality Score",
+  "svd_1"  = "Formal Political Speech",
+  "svd_2"  = "Social Titles & Personal News",
+  "svd_3"  = "Abbreviations & OCR Artifacts",
+  "svd_4"  = "Non-English Text (German)",
+  "svd_5"  = "Legislative Language",
+  "svd_6"  = "Non-English Text (Spanish)",
+  "svd_11" = "Local Government & Civic",
+  "svd_12" = "Court & Legal Reporting",
+  "svd_24" = "Financial & Real Estate",
+  "svd_26" = "Banking & Commerce",
+  "svd_30" = "Legal Cases & Religious",
+  "svd_32" = "Monetary Reporting",
+  "svd_45" = "Measurements & Classifieds",
+  "svd_47" = "Property & Tax Listings",
+  "svd_54" = "Government Agencies",
+  "svd_58" = "Political Districts & Companies",
+  "svd_71" = "Political Parties & Legislation",
+  "svd_93" = "City & Place Names"
+)
+imp[, label := ifelse(feature %in% names(label_map),
+                       label_map[feature], feature)]
+
+p_imp <- ggplot(imp, aes(x = reorder(label, importance), y = importance)) +
   geom_col(fill = "steelblue") +
   coord_flip() +
   labs(x = NULL, y = "Importance (Impurity)",
-       title = "Top 20 Features — RF Incivility Classifier") +
-  theme_minimal()
+       title = "Top 20 Features \u2014 RF Incivility Classifier") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.y = element_text(size = 10))
 
-save_figure(p_imp, "rf_variable_importance", width = 8, height = 6)
+save_figure(p_imp, "rf_variable_importance", width = 10, height = 7)
 print(p_imp)
+
+gc()
 ```
 
 ## Score full corpus
 
 ```{r score-corpus}
+# PARALLEL SCORING OPTION:
+# If USE_PARALLEL_SCORING is TRUE, this chunk only verifies model artifacts
+# and prints instructions for launching parallel workers. The inline loop
+# is skipped. Set to FALSE to score inline (slower, single-threaded).
+USE_PARALLEL_SCORING <- TRUE
+
 library(quanteda)
 
 # Load SVD model info for transforming new articles
 svd_info <- readRDS(file.path(MODELS_DIR, "svd_model_info.rds"))
+
+# Verify that IDF weights are present (added in fixed step 04)
+if (is.null(svd_info$idf_weights)) {
+  stop("svd_model_info.rds does not contain idf_weights. ",
+       "Re-run step 04 (feature engineering) first.")
+}
+message("Loaded SVD model with ", length(svd_info$vocab), " vocab terms, ",
+        length(svd_info$idf_weights), " IDF weights, ",
+        svd_info$n_components, " SVD components")
+
+# Minimum word count: articles shorter than this get NA (lexicon fallback)
+MIN_WORDS_FOR_RF <- 10L
 
 scored_dir <- file.path(DATA_PARQUET, "articles_scored")
 scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRUE)
@@ -305,9 +371,44 @@ scored_files <- list.files(scored_dir, pattern = "\\.parquet$", full.names = TRU
 rf_scored_dir <- file.path(DATA_PANELS, "rf_scored")
 dir.create(rf_scored_dir, recursive = TRUE, showWarnings = FALSE)
 
+# Check how many years still need scoring
+n_already_done <- length(list.files(rf_scored_dir, pattern = "\\.parquet$"))
+n_todo <- length(scored_files) - n_already_done
+message("RF scoring: ", n_already_done, " years done, ", n_todo, " remaining of ", length(scored_files))
+
+if (USE_PARALLEL_SCORING && n_todo > 0) {
+  message("\n============================================================")
+  message("PARALLEL SCORING MODE ENABLED")
+  message("============================================================")
+  message("Model artifacts are ready. Skipping inline scoring loop.")
+  message("Launch parallel workers with:")
+  message("  powershell -ExecutionPolicy Bypass -File R\\_launch_parallel_scoring.ps1")
+  message("")
+  message("After all workers finish, resume pipeline from step 7:")
+  message("  Rscript run_pipeline.R 7 10")
+  message("============================================================")
+
+  # Write a sentinel file so we know scoring is pending
+  writeLines(as.character(Sys.time()),
+             file.path(MODELS_DIR, ".parallel_scoring_pending"))
+
+  # CRITICAL: Stop the pipeline here. Step 06 expects rf_scored files.
+  # If we don't stop, the pipeline will immediately try to build treatment
+  # panels from non-existent scored data.
+  stop("PARALLEL SCORING: Pipeline halted after model training. ",
+       "Run parallel workers, then resume with: Rscript run_pipeline.R 7 10",
+       call. = FALSE)
+} else if (n_todo == 0) {
+  message("All years already RF-scored. Nothing to do.")
+}
+
+# Only run inline loop when NOT in parallel mode (or everything is already done)
+if (!USE_PARALLEL_SCORING || n_todo == 0) {
+
 for (sf in scored_files) {
   yr <- gsub(".*scored_(\\d{4})\\.parquet", "\\1", sf)
   outpath <- file.path(rf_scored_dir, paste0("rf_scored_", yr, ".parquet"))
+  tmppath <- paste0(outpath, ".tmp")  # atomic write: write to tmp, then rename
 
   if (file.exists(outpath)) {
     message("Year ", yr, " already RF-scored, skipping.")
@@ -317,9 +418,19 @@ for (sf in scored_files) {
   message("RF-scoring year ", yr, "...")
   dt_year <- as.data.table(read_parquet(sf))
 
-  # Always store lexicon-based score
-  dt_year[, p_incivil_lexicon := uncivil_score]
+  # Always store lexicon-based score (properly scaled to [0,1] via min-max)
+  # uncivil_score is rate per 1000 words; convert to crude probability
+  dt_year[, p_incivil_lexicon := {
+    s <- uncivil_score
+    s_pos <- s[s > 0 & !is.na(s)]
+    s_max <- if (length(s_pos) > 0) quantile(s_pos, 0.99) else 1
+    if (is.na(s_max) || s_max == 0) s_max <- 1  # safe default
+    pmin(1, pmax(0, s / s_max))
+  }]
   dt_year[, p_incivil := NA_real_]
+
+  # Track fallback count for logging
+  n_fallback <- 0L
 
   # Process in chunks to avoid memory blow-up on large years
   chunk_size <- 50000L
@@ -334,6 +445,14 @@ for (sf in scored_files) {
 
     tryCatch({
       chunk_text <- dt_year$article[chunk_rows]
+
+      # --- Handle short/empty articles ---
+      # Articles with fewer than MIN_WORDS_FOR_RF words after preprocessing
+      # get degenerate SVD features. Flag them for lexicon fallback.
+      word_counts <- stringi::stri_count_words(chunk_text)
+      word_counts[is.na(word_counts)] <- 0L
+      short_mask <- word_counts < MIN_WORDS_FOR_RF
+
       corp_c <- corpus(chunk_text)
       toks_c <- tokens(corp_c, remove_punct = TRUE, remove_numbers = TRUE,
                        remove_symbols = TRUE) |>
@@ -341,24 +460,44 @@ for (sf in scored_files) {
         tokens_remove(stopwords("en")) |>
         tokens_wordstem()
 
+      # --- FIXED: Correct order of operations ---
+      # 1. Build raw DFM
+      # 2. Match to training vocabulary FIRST (trim to same features)
+      # 3. Apply saved IDF weights (not recomputed per-chunk)
       dfmat_c <- dfm(toks_c)
-      dfmat_c <- dfm_tfidf(dfmat_c)
-      dfmat_c <- dfm_match(dfmat_c, svd_info$vocab)
+      dfmat_c <- dfm_match(dfmat_c, svd_info$vocab)  # FIRST: match to training vocab
 
-      mat_c <- as.matrix(dfmat_c)
+      # Apply saved training IDF weights via sparse matrix operations (memory efficient)
+      idf_vec <- svd_info$idf_weights[svd_info$vocab]
+      sp_mat <- Matrix::as(dfmat_c, "dgCMatrix")
+      sp_mat <- sp_mat %*% Matrix::Diagonal(x = idf_vec)  # TF * saved_IDF (stays sparse)
+
+      # Apply SVD projection: (X - center) %*% rotation
+      # Use centering trick to avoid densifying: (X-c)R = XR - cR
       if (!is.null(svd_info$center)) {
-        mat_c <- sweep(mat_c, 2, svd_info$center)
+        center_proj <- as.numeric(crossprod(svd_info$center, svd_info$rotation))
+        svd_raw <- as.matrix(sp_mat %*% svd_info$rotation)
+        svd_scores <- sweep(svd_raw, 2, center_proj, `-`)
+        rm(svd_raw)
+      } else {
+        svd_scores <- as.matrix(sp_mat %*% svd_info$rotation)
       }
-      svd_scores <- mat_c %*% svd_info$rotation
+      rm(sp_mat)
 
       svd_dt <- as.data.table(svd_scores)
       names(svd_dt) <- paste0("svd_", seq_len(ncol(svd_dt)))
 
+      # --- Metadata features (sub-scores EXCLUDED to match training) ---
       meta_c <- dt_year[chunk_rows, .(front_page, headline_length, n_words,
-                                       has_byline, ocr_quality, page_num,
-                                       insult_score, dehumanize_score,
-                                       violence_score, conspiracy_score,
-                                       intolerance_score)]
+                                       has_byline, ocr_quality, page_num)]
+      # Guard against NAs in metadata
+      meta_c[is.na(headline_length), headline_length := 0L]
+      meta_c[is.na(has_byline), has_byline := 0L]
+      meta_c[is.na(front_page), front_page := 0L]
+      meta_c[is.na(ocr_quality), ocr_quality := 0]
+      meta_c[is.na(page_num), page_num := 0L]
+      meta_c[is.na(n_words), n_words := 0L]
+
       feat_c <- cbind(meta_c, svd_dt)
 
       for (fc in feature_cols) {
@@ -370,27 +509,47 @@ for (sf in scored_files) {
       }
 
       pred_c <- predict(rf_final, feat_c)
-      set(dt_year, chunk_rows, "p_incivil",
-          calibrate_fn(pred_c$predictions[, "1"]))
+      p_vals <- calibrate_fn(pred_c$predictions[, "1"])
 
-      rm(corp_c, toks_c, dfmat_c, mat_c, svd_scores, svd_dt, meta_c, feat_c, pred_c)
+      # Set short articles to NA (will get fallback below)
+      p_vals[short_mask] <- NA_real_
+      n_fallback <- n_fallback + sum(short_mask)
+
+      set(dt_year, chunk_rows, "p_incivil", p_vals)
+
+      rm(corp_c, toks_c, dfmat_c, mat_c, svd_scores, svd_dt,
+         meta_c, feat_c, pred_c, p_vals, chunk_text, word_counts, short_mask)
       gc()
     }, error = function(e) {
       message("  Chunk ", ci, " failed: ", e$message, " -> lexicon fallback")
+      n_fallback <<- n_fallback + length(chunk_rows)
+      # Fallback: use SCALED lexicon score (not raw rate per 1000 words)
       set(dt_year, chunk_rows, "p_incivil",
-          dt_year$uncivil_score[chunk_rows])
+          dt_year$p_incivil_lexicon[chunk_rows])
     })
   }
 
-  # Fill any remaining NAs with lexicon fallback
-  dt_year[is.na(p_incivil), p_incivil := uncivil_score]
+  # Fill remaining NAs with scaled lexicon fallback (not raw uncivil_score)
+  # (n_fallback already includes short articles from chunk loop — don't double-count)
+  na_remaining <- sum(is.na(dt_year$p_incivil))
+  if (na_remaining > 0) {
+    dt_year[is.na(p_incivil), p_incivil := p_incivil_lexicon]
+  }
 
+  if (n_fallback > 0) {
+    message("  WARNING: ", n_fallback, " / ", n_total,
+            " articles used lexicon fallback (",
+            round(n_fallback / n_total * 100, 1), "%)")
+  }
+
+  # Atomic write: write to tmp file, then rename
   write_parquet(
     dt_year[, .(article_id, newspaper_name, year, year_month, date,
                 front_page, n_words, page_num, ocr_quality,
                 uncivil_score, p_incivil, p_incivil_lexicon)],
-    outpath
+    tmppath
   )
+  file.rename(tmppath, outpath)
   message("  Saved ", nrow(dt_year), " RF-scored articles for year ", yr)
 
   rm(dt_year)
@@ -398,6 +557,8 @@ for (sf in scored_files) {
 }
 
 message("\nFull corpus scoring complete.")
+
+} # end if (!USE_PARALLEL_SCORING || n_todo == 0)
 ```
 
 ## Save CV results table
@@ -406,8 +567,8 @@ message("\nFull corpus scoring complete.")
 library(modelsummary)
 
 cv_summary[, fold := as.character(fold)]
-overall <- data.table(fold = "Mean", auc = mean(cv_summary$auc),
-                      brier = mean(cv_summary$brier))
+overall <- data.table(fold = "Mean", auc = mean(cv_summary$auc, na.rm = TRUE),
+                      brier = mean(cv_summary$brier, na.rm = TRUE))
 cv_table <- rbind(cv_summary, overall)
 cv_table[, auc := round(auc, 4)]
 cv_table[, brier := round(brier, 4)]

@@ -1,0 +1,101 @@
+---
+title: "05b — Fine-Tune RoBERTa Large for Antisemitism Classification"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Prerequisites check
+
+```{r check-prereqs}
+# Use reconciled labels (Claude + Gemini ensemble, Claude-adjudicated)
+verified_path <- file.path(DATA_PANELS, "antisem_labels_all_verified.csv")
+labels_path <- verified_path
+if (!file.exists(verified_path)) {
+  # Fallback to raw Claude labels
+  labels_path <- file.path(DATA_PANELS, "antisem_labels_raw.csv")
+  message("WARNING: Using raw Claude labels (reconciliation not yet run)")
+}
+if (!file.exists(labels_path)) {
+  stop("Labels not found. Run reconciliation first: ", labels_path)
+}
+
+labels <- read.csv(labels_path)
+message("Label source: ", basename(labels_path))
+message("Labeled articles: ", nrow(labels))
+message("Label distribution:")
+print(table(labels$label, useNA = "always"))
+```
+
+## GPU verification
+
+```{r gpu-check}
+library(reticulate)
+use_python(PYTHON_EXE, required = TRUE)
+
+py_run_string("
+import torch
+if torch.cuda.is_available():
+    print(f'CUDA available: {torch.cuda.get_device_name(0)}')
+    print(f'VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
+else:
+    print('WARNING: CUDA not available. Training will be on CPU (very slow).')
+")
+```
+
+## Fine-tune RoBERTa Large
+
+```{r finetune}
+# Skip if model already exists
+model_dir <- file.path(MODELS_DIR, "roberta_antisemitism")
+
+if (file.exists(file.path(model_dir, "model.safetensors")) ||
+    file.exists(file.path(model_dir, "pytorch_model.bin"))) {
+  message("RoBERTa model already exists at ", model_dir)
+  message("Delete the directory to retrain.")
+} else {
+  message("Starting RoBERTa Large fine-tuning...")
+  message("This may take 10-30 minutes on GPU.")
+
+  source_python(file.path(PROJECT_ROOT, "R", "finetune_roberta.py"))
+  results <- finetune_roberta(labels_path, model_dir, seed = as.integer(SEED))
+
+  message("\n=== Fine-tuning complete ===")
+}
+```
+
+## Model evaluation summary
+
+```{r eval-summary}
+metrics_path <- file.path(model_dir, "training_metrics.json")
+if (file.exists(metrics_path)) {
+  metrics <- jsonlite::fromJSON(metrics_path)
+
+  cat("\n--- Evaluation Metrics ---\n")
+  for (k in names(metrics$eval_metrics)) {
+    v <- metrics$eval_metrics[[k]]
+    if (is.numeric(v)) {
+      cat(sprintf("  %s: %.4f\n", k, v))
+    }
+  }
+
+  cat("\n--- Data Split ---\n")
+  cat(sprintf("  Train: %d samples (%.1f%% positive)\n",
+              metrics$train_samples,
+              metrics$label_distribution$train_positive * 100))
+  cat(sprintf("  Val:   %d samples (%.1f%% positive)\n",
+              metrics$val_samples,
+              metrics$label_distribution$val_positive * 100))
+
+  cat("\n--- Confusion Matrix ---\n")
+  cm <- metrics$confusion_matrix
+  cat(sprintf("  TN=%d  FP=%d\n  FN=%d  TP=%d\n",
+              cm[[1]][1], cm[[1]][2], cm[[2]][1], cm[[2]][2]))
+} else {
+  message("No metrics file found at ", metrics_path)
+}
+```

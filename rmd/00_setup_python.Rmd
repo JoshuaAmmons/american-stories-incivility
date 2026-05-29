@@ -22,6 +22,16 @@ use_python(PYTHON_EXE, required = TRUE)
 py_install(c("datasets", "huggingface_hub", "pyarrow"), pip = TRUE)
 ```
 
+## Install RoBERTa / Transformer dependencies
+
+Needed for the antisemitism classification pipeline (steps 05b/05c).
+
+```{r install-transformer-deps}
+# Install torch with CUDA support + transformers ecosystem
+# NOTE: torch CUDA wheels are large (~2GB). This may take a while on first run.
+py_install(c("torch", "transformers", "accelerate", "scikit-learn"), pip = TRUE)
+```
+
 ## Verify Python setup
 
 ```{r verify}
@@ -32,4 +42,20 @@ hf <- import("huggingface_hub")
 message("huggingface_hub version: ", hf$`__version__`)
 
 message("Python setup complete.")
+```
+
+## Verify GPU / CUDA availability
+
+```{r verify-gpu}
+py_run_string("
+import torch
+print(f'PyTorch version: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'GPU: {torch.cuda.get_device_name(0)}')
+    print(f'VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
+    print(f'CUDA version: {torch.version.cuda}')
+else:
+    print('WARNING: No CUDA GPU detected. RoBERTa training/scoring will use CPU.')
+")
 ```

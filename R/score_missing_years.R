@@ -1,3 +1,10 @@
+# DEPRECATED: Use R/_overnight_worker.R instead. This script has known bugs:
+#   - dfm_tfidf() called BEFORE dfm_match() (wrong TF-IDF computation)
+#   - IDF weights recomputed per-chunk instead of using saved training weights
+#   - Lexicon fallback uses raw uncivil_score (not scaled to [0,1])
+# See R/_overnight_worker.R for the fixed, GPU-accelerated version.
+stop("DEPRECATED: Use R/_overnight_worker.R with R/_launch_parallel_scoring.ps1 instead.")
+
 # score_missing_years.R — Score all years missing RF predictions
 # Standalone script that can run autonomously in background
 # Reuses the same logic as 05_random_forest.Rmd scoring chunk

@@ -18,12 +18,41 @@ library(data.table)
 library(dplyr)
 library(stringr)
 
+# Check that parallel scoring is complete before proceeding
+sentinel_path <- file.path(MODELS_DIR, ".parallel_scoring_pending")
+if (file.exists(sentinel_path)) {
+  scored_dir_check <- file.path(DATA_PARQUET, "articles_scored")
+  rf_scored_check  <- file.path(DATA_PANELS, "rf_scored")
+  n_source <- length(list.files(scored_dir_check, pattern = "\\.parquet$"))
+  n_done   <- length(list.files(rf_scored_check, pattern = "\\.parquet$"))
+  if (n_done < n_source) {
+    stop("Parallel scoring still pending: ", n_done, "/", n_source, " years done. ",
+         "Finish scoring workers before running step 06.", call. = FALSE)
+  } else {
+    # All years scored but sentinel wasn't cleaned up — remove it
+    file.remove(sentinel_path)
+    message("Sentinel file removed (all years already scored).")
+  }
+}
+
 rf_scored_dir <- file.path(DATA_PANELS, "rf_scored")
 scored_files <- list.files(rf_scored_dir, pattern = "\\.parquet$", full.names = TRUE)
 message("Found ", length(scored_files), " scored year files")
 
 # Load all scored articles
 dt_all <- rbindlist(lapply(scored_files, read_parquet), fill = TRUE)
+message("Total articles (raw): ", nrow(dt_all))
+
+# Deduplicate: articles can appear in adjacent year files
+# Keep the first occurrence (by article_id), which preserves the canonical year
+n_before <- nrow(dt_all)
+dt_all <- dt_all[!duplicated(article_id)]
+n_dupes <- n_before - nrow(dt_all)
+if (n_dupes > 0) {
+  message("  Removed ", n_dupes, " duplicate articles (",
+          round(n_dupes / n_before * 100, 2), "%)")
+}
+
 message("Total articles: ", nrow(dt_all))
 message("Year range: ", min(dt_all$year, na.rm = TRUE), "-",
         max(dt_all$year, na.rm = TRUE))
@@ -54,12 +83,28 @@ build_figure_panel <- function(fig_key, fig_config, dt, text_files) {
   }
 
   # --- Step 1: Flag figure-related articles ---
-  pattern <- regex(
-    paste0("\\b(", paste(fig_config$keywords, collapse = "|"), ")\\b"),
-    ignore_case = TRUE
-  )
+  # FIXED: Separate simple keywords from regex lookahead patterns.
+  # Simple keywords get wrapped in \b(kw1|kw2)\b for word-boundary matching.
+  # Lookahead patterns (containing "(?=") are tested individually with str_detect
+  # because wrapping them in \b() would break the lookahead anchor.
+  simple_kws <- fig_config$keywords[!grepl("\\(\\?=", fig_config$keywords)]
+  regex_kws  <- fig_config$keywords[grepl("\\(\\?=", fig_config$keywords)]
+
+  # Build simple pattern (word-boundary wrapped)
+  simple_pattern <- if (length(simple_kws) > 0) {
+    regex(paste0("\\b(", paste(simple_kws, collapse = "|"), ")\\b"),
+          ignore_case = TRUE)
+  } else NULL
+
+  # Pre-compile regex patterns
+  regex_patterns <- if (length(regex_kws) > 0) {
+    lapply(regex_kws, function(p) regex(p, ignore_case = TRUE))
+  } else list()
 
   message("Flagging articles matching: ", paste(fig_config$keywords, collapse = " | "))
+  if (length(regex_kws) > 0) {
+    message("  Co-occurrence patterns (lookahead): ", paste(regex_kws, collapse = " | "))
+  }
 
   figure_flags <- list()
   for (sf in text_files) {
@@ -69,12 +114,36 @@ build_figure_panel <- function(fig_key, fig_config, dt, text_files) {
     if (yr < fig_config$min_year) next
 
     dt_yr <- as.data.table(read_parquet(sf, col_select = c("article_id", "article")))
-    dt_yr[, is_figure := as.integer(str_detect(tolower(article), pattern))]
+    text_lower <- tolower(dt_yr$article)
+
+    # Start with simple keyword match
+    hit <- rep(FALSE, nrow(dt_yr))
+    if (!is.null(simple_pattern)) {
+      hit <- str_detect(text_lower, simple_pattern)
+      hit[is.na(hit)] <- FALSE
+    }
+
+    # Add lookahead pattern matches (OR logic: any hit counts)
+    for (rp in regex_patterns) {
+      rp_hit <- str_detect(text_lower, rp)
+      rp_hit[is.na(rp_hit)] <- FALSE
+      hit <- hit | rp_hit
+    }
+
+    dt_yr[, is_figure := as.integer(hit)]
     figure_flags[[as.character(yr)]] <- dt_yr[, .(article_id, is_figure)]
-    rm(dt_yr)
+    rm(dt_yr, text_lower, hit)
   }
 
   figure_df <- rbindlist(figure_flags)
+  # Deduplicate: articles in adjacent year files produce duplicate flags.
+  # Take the max flag per article_id (if flagged in any file, keep flagged).
+  n_before_dedup <- nrow(figure_df)
+  figure_df <- figure_df[, .(is_figure = max(is_figure)), by = article_id]
+  n_deduped <- n_before_dedup - nrow(figure_df)
+  if (n_deduped > 0) {
+    message("  Deduplicated ", n_deduped, " duplicate article flags")
+  }
   message("  Figure-mentioning articles: ", sum(figure_df$is_figure))
 
   if (sum(figure_df$is_figure) == 0) {
@@ -86,6 +155,13 @@ build_figure_panel <- function(fig_key, fig_config, dt, text_files) {
   dt_fig <- copy(dt)
   dt_fig <- merge(dt_fig, figure_df, by = "article_id", all.x = TRUE)
   dt_fig[is.na(is_figure), is_figure := 0L]
+
+  # Drop articles with NA year_month (failed date parsing upstream)
+  n_na_ym <- sum(is.na(dt_fig$year_month))
+  if (n_na_ym > 0) {
+    message("  Dropping ", n_na_ym, " articles with NA year_month")
+    dt_fig <- dt_fig[!is.na(year_month)]
+  }
 
   # Filter to study window
   study_years <- fig_config$study_start:fig_config$study_end
@@ -118,16 +194,22 @@ build_figure_panel <- function(fig_key, fig_config, dt, text_files) {
   setorder(panel, newspaper_name, ym_date)
 
   # --- Step 3: Define treatment (sustained coverage) ---
-  # Treated if >= 2 figure articles in >= 2 of 3 consecutive months
+  # Treated if >= 2 figure articles in >= 2 of 3 consecutive CALENDAR months.
+  # FIXED: Must verify time_id consecutiveness (row indices may have gaps)
   panel[, sustained := {
     n <- .N
     flag <- rep(0L, n)
     if (n >= 3) {
+      tid <- time_id  # integer encoding of calendar months
+      fc  <- figure_count
       for (i in 1:(n - 2)) {
-        months_with <- sum(figure_count[i:(i+2)] >= 2)
-        if (months_with >= 2) {
-          flag[i] <- 1L
-          break
+        # Verify these are actually 3 consecutive calendar months
+        if (tid[i+1] - tid[i] == 1L && tid[i+2] - tid[i+1] == 1L) {
+          months_with <- sum(fc[i:(i+2)] >= 2)
+          if (months_with >= 2) {
+            flag[i] <- 1L
+            break
+          }
         }
       }
     }
@@ -168,6 +250,10 @@ build_figure_panel <- function(fig_key, fig_config, dt, text_files) {
   if (n_treated == 0) {
     message("  WARNING: No treated newspapers found. Panel not saved.")
     return(invisible(NULL))
+  }
+  if (n_control == 0) {
+    message("  WARNING: All newspapers are treated (no never-treated controls).")
+    message("  DiD estimators requiring not-yet-treated controls (cs_notyet) may fail.")
   }
 
   # --- Save ---

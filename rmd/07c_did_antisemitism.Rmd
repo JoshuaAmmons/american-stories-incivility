@@ -1,0 +1,393 @@
+---
+title: "07c — DiD Estimation: Antisemitism Outcome (All Methods)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+```{r libraries}
+library(arrow)
+library(data.table)
+library(fect)
+
+# Load modern DiD wrapper
+source(file.path(PROJECT_ROOT, "R", "did_wrapper.R"))
+```
+
+## fect models (IFE, MC, FE)
+
+```{r fect-estimate}
+library(parallel)
+
+fect_methods <- c("ife", "mc", "fe")
+total_cores <- parallel::detectCores()
+
+# --- Strategy: parallelize across figures ---
+# Each figure gets: 3 fect models + 1 placebo + 1 lexicon = 5 models
+# fect's internal bootstrap uses multiple cores
+# Balance: N_WORKERS figures in parallel, each getting CORES_PER cores for bootstrap
+#
+# With ~16 cores:  3 figure-workers × 4 bootstrap-cores = 12 cores utilized
+# With ~8 cores:   2 figure-workers × 3 bootstrap-cores = 6 cores utilized
+
+# Determine which figures still need work
+todo_figs <- names(FIGURES)[sapply(names(FIGURES), function(fk) {
+  panel_path <- file.path(DATA_PANELS, paste0("did_panel_antisem_", fk, ".parquet"))
+  if (!file.exists(panel_path)) return(FALSE)  # no panel = skip
+  # Check if ALL 5 models exist for this figure
+  paths <- c(
+    file.path(MODELS_DIR, paste0("fect_ife_antisem_", fk, ".rds")),
+    file.path(MODELS_DIR, paste0("fect_mc_antisem_", fk, ".rds")),
+    file.path(MODELS_DIR, paste0("fect_fe_antisem_", fk, ".rds")),
+    file.path(MODELS_DIR, paste0("fect_placebo_antisem_", fk, ".rds")),
+    file.path(MODELS_DIR, paste0("fect_ife_lexicon_antisem_", fk, ".rds"))
+  )
+  !all(file.exists(paths))
+})]
+
+n_todo <- length(todo_figs)
+message("Figures needing fect models: ", n_todo, " of ", length(FIGURES))
+
+if (n_todo == 0) {
+  message("All fect models already exist.")
+} else {
+  # Set parallelism levels
+  N_WORKERS <- min(n_todo, max(1, floor(total_cores / 4)))
+  CORES_PER <- max(2, floor((total_cores - 1) / N_WORKERS))
+  message("Strategy: ", N_WORKERS, " figure-workers × ", CORES_PER,
+          " bootstrap-cores = ", N_WORKERS * CORES_PER, " cores (",
+          total_cores, " available)")
+
+  # Progress directory
+  prog_dir_fect <- file.path(MODELS_DIR, ".progress_fect")
+  dir.create(prog_dir_fect, recursive = TRUE, showWarnings = FALSE)
+
+  # Worker function: fit all fect models for one figure
+  fit_all_fect <- function(fig_key, figures_list, models_dir, panels_dir,
+                           cores_per, seed_val) {
+    library(arrow)
+    library(data.table)
+    library(fect)
+
+    prog_file <- file.path(models_dir, ".progress_fect", paste0(fig_key, ".txt"))
+    writeLines(paste0("STARTED ", Sys.time()), prog_file)
+
+    fig <- figures_list[[fig_key]]
+    panel_path <- file.path(panels_dir, paste0("did_panel_antisem_", fig_key, ".parquet"))
+    panel <- as.data.table(read_parquet(panel_path))
+
+    n_treated <- uniqueN(panel[!is.na(treat_date), newspaper_id])
+    if (n_treated < 3) {
+      writeLines(paste0("SKIPPED <3 treated"), prog_file)
+      return(paste0(fig_key, ": SKIPPED (<3 treated)"))
+    }
+
+    results <- character(0)
+
+    # --- 3 fect methods ---
+    for (method in c("ife", "mc", "fe")) {
+      model_path <- file.path(models_dir,
+                              paste0("fect_", method, "_antisem_", fig_key, ".rds"))
+      if (file.exists(model_path)) {
+        results <- c(results, paste0("  ", method, ": exists"))
+        next
+      }
+
+      writeLines(paste0("FITTING ", method, " ", Sys.time()), prog_file)
+      out <- tryCatch({
+        fect(
+          antisem_rate_roberta ~ treated,
+          data = as.data.frame(panel),
+          index = c("newspaper_id", "time_id"),
+          method = method,
+          force = "two-way",
+          se = TRUE,
+          vartype = "bootstrap",
+          nboots = 200,
+          parallel = TRUE,
+          cores = cores_per,
+          seed = seed_val
+        )
+      }, error = function(e) NULL)
+
+      if (!is.null(out)) {
+        saveRDS(out, model_path)
+        boot_se <- if (!is.null(out$att.avg.boot) && length(out$att.avg.boot) > 1) {
+          sd(out$att.avg.boot)
+        } else NA_real_
+        results <- c(results, paste0("  ", method, ": ATT=", round(out$att.avg, 4),
+                                     " SE=", round(boot_se, 4)))
+        writeLines(paste0("DONE ", method, " ATT=", round(out$att.avg, 4), " ", Sys.time()), prog_file)
+      } else {
+        results <- c(results, paste0("  ", method, ": FAILED"))
+        writeLines(paste0("FAILED ", method, " ", Sys.time()), prog_file)
+      }
+      rm(out); gc()
+    }
+
+    # --- Placebo test (IFE) ---
+    writeLines(paste0("FITTING placebo ", Sys.time()), prog_file)
+    placebo_path <- file.path(models_dir,
+                              paste0("fect_placebo_antisem_", fig_key, ".rds"))
+    if (!file.exists(placebo_path)) {
+      out_p <- tryCatch({
+        fect(
+          antisem_rate_roberta ~ treated,
+          data = as.data.frame(panel),
+          index = c("newspaper_id", "time_id"),
+          method = "ife",
+          force = "two-way",
+          se = TRUE, vartype = "bootstrap", nboots = 200,
+          parallel = TRUE, cores = cores_per, seed = seed_val,
+          placeboTest = TRUE, placebo.period = c(-6, -1)
+        )
+      }, error = function(e) NULL)
+      if (!is.null(out_p)) {
+        saveRDS(out_p, placebo_path)
+        results <- c(results, "  placebo: saved")
+      } else {
+        results <- c(results, "  placebo: FAILED")
+      }
+      rm(out_p); gc()
+    } else {
+      results <- c(results, "  placebo: exists")
+    }
+
+    # --- Robustness: lexicon outcome (IFE) ---
+    writeLines(paste0("FITTING lexicon ", Sys.time()), prog_file)
+    lex_path <- file.path(models_dir,
+                          paste0("fect_ife_lexicon_antisem_", fig_key, ".rds"))
+    if (!file.exists(lex_path)) {
+      out_lex <- tryCatch({
+        fect(
+          antisem_rate_lexicon ~ treated,
+          data = as.data.frame(panel),
+          index = c("newspaper_id", "time_id"),
+          method = "ife",
+          force = "two-way",
+          se = TRUE, vartype = "bootstrap", nboots = 200,
+          parallel = TRUE, cores = cores_per, seed = seed_val
+        )
+      }, error = function(e) NULL)
+      if (!is.null(out_lex)) {
+        saveRDS(out_lex, lex_path)
+        results <- c(results, paste0("  lexicon: ATT=", round(out_lex$att.avg, 4)))
+      } else {
+        results <- c(results, "  lexicon: FAILED")
+      }
+      rm(out_lex); gc()
+    } else {
+      results <- c(results, "  lexicon: exists")
+    }
+
+    rm(panel); gc()
+    writeLines(paste0("ALL DONE ", Sys.time()), prog_file)
+    paste0(fig_key, ":\n", paste(results, collapse = "\n"))
+  }
+
+  if (N_WORKERS <= 1) {
+    # Sequential fallback
+    for (fig_key in todo_figs) {
+      msg <- fit_all_fect(fig_key, FIGURES, MODELS_DIR, DATA_PANELS,
+                          CORES_PER, SEED)
+      message(msg)
+    }
+  } else {
+    cl <- makeCluster(N_WORKERS)
+    on.exit(stopCluster(cl), add = TRUE)
+
+    results <- parLapplyLB(cl, todo_figs, fit_all_fect,
+                           figures_list = FIGURES,
+                           models_dir = MODELS_DIR,
+                           panels_dir = DATA_PANELS,
+                           cores_per = CORES_PER,
+                           seed_val = SEED)
+
+    stopCluster(cl)
+    on.exit(NULL)
+
+    message("\n=== fect results ===")
+    for (r in results) message(r, "\n")
+  }
+}
+
+message("\n\nAll fect antisemitism models complete.")
+```
+
+## Modern DiD estimators (CS, SA, dCDH, TWFE)
+
+```{r modern-did}
+did_methods <- c("cs_notyet", "iw", "didm", "twfe")
+did_labels  <- c(cs_notyet = "Callaway & Sant'Anna",
+                 iw        = "Sun & Abraham",
+                 didm      = "de Chaisemartin & D'Haultfoeuille",
+                 twfe      = "Dynamic TWFE")
+
+# Determine which figures need modern DiD work
+todo_figs_did <- names(FIGURES)[sapply(names(FIGURES), function(fk) {
+  panel_path <- file.path(DATA_PANELS, paste0("did_panel_antisem_", fk, ".parquet"))
+  if (!file.exists(panel_path)) return(FALSE)
+  paths <- paste0(file.path(MODELS_DIR, paste0("did_", did_methods, "_antisem_", fk, ".rds")))
+  !all(file.exists(paths))
+})]
+
+n_todo_did <- length(todo_figs_did)
+message("Figures needing modern DiD: ", n_todo_did, " of ", length(FIGURES))
+
+if (n_todo_did == 0) {
+  message("All modern DiD models already exist.")
+} else {
+  # Modern DiD is faster than fect (no bootstrap) — use more figure-workers
+  N_WORKERS_DID <- min(n_todo_did, max(1, total_cores - 1))
+  message("Launching ", N_WORKERS_DID, " workers for ", n_todo_did, " figures")
+
+  prog_dir_did <- file.path(MODELS_DIR, ".progress_did")
+  dir.create(prog_dir_did, recursive = TRUE, showWarnings = FALSE)
+
+  fit_all_modern_did <- function(fig_key, figures_list, models_dir, panels_dir,
+                                  wrapper_path, did_methods_vec) {
+    library(arrow)
+    library(data.table)
+    source(wrapper_path)
+
+    prog_file <- file.path(models_dir, ".progress_did", paste0(fig_key, ".txt"))
+    writeLines(paste0("STARTED ", Sys.time()), prog_file)
+
+    fig <- figures_list[[fig_key]]
+    panel_path <- file.path(panels_dir, paste0("did_panel_antisem_", fig_key, ".parquet"))
+    panel <- as.data.table(read_parquet(panel_path))
+
+    results <- character(0)
+    for (method in did_methods_vec) {
+      model_path <- file.path(models_dir,
+                              paste0("did_", method, "_antisem_", fig_key, ".rds"))
+      if (file.exists(model_path)) {
+        results <- c(results, paste0("  ", method, ": exists"))
+        next
+      }
+
+      out <- tryCatch({
+        extra_args <- list(
+          data   = as.data.frame(panel),
+          Y      = "antisem_rate_roberta",
+          D      = "treated",
+          index  = c("newspaper_id", "time_id"),
+          method = method
+        )
+        if (method == "didm") {
+          extra_args$didm.effects <- 6
+          extra_args$didm.placebo <- 3
+        }
+        do.call(did_wrapper, extra_args)
+      }, error = function(e) NULL)
+
+      if (!is.null(out)) {
+        saveRDS(out, model_path)
+        avg <- out$est.avg
+        results <- c(results, paste0("  ", method, ": ATT=", round(avg$ATT.avg, 4),
+                                     " SE=", round(avg$S.E., 4)))
+      } else {
+        results <- c(results, paste0("  ", method, ": FAILED"))
+      }
+      rm(out); gc()
+    }
+
+    rm(panel); gc()
+    writeLines(paste0("ALL DONE ", Sys.time()), prog_file)
+    paste0(fig_key, ":\n", paste(results, collapse = "\n"))
+  }
+
+  wrapper_path <- file.path(PROJECT_ROOT, "R", "did_wrapper.R")
+
+  if (N_WORKERS_DID <= 1) {
+    for (fig_key in todo_figs_did) {
+      msg <- fit_all_modern_did(fig_key, FIGURES, MODELS_DIR, DATA_PANELS,
+                                 wrapper_path, did_methods)
+      message(msg)
+    }
+  } else {
+    cl <- makeCluster(N_WORKERS_DID)
+    on.exit(stopCluster(cl), add = TRUE)
+
+    results <- parLapplyLB(cl, todo_figs_did, fit_all_modern_did,
+                           figures_list = FIGURES,
+                           models_dir = MODELS_DIR,
+                           panels_dir = DATA_PANELS,
+                           wrapper_path = wrapper_path,
+                           did_methods_vec = did_methods)
+
+    stopCluster(cl)
+    on.exit(NULL)
+
+    message("\n=== Modern DiD results ===")
+    for (r in results) message(r, "\n")
+  }
+}
+
+message("\n\nAll modern DiD antisemitism models complete.")
+```
+
+## Results summary
+
+```{r results-summary}
+extract_att <- function(model, label) {
+  att <- as.numeric(model$att.avg)
+  se <- if (!is.null(model$att.avg.boot) && length(model$att.avg.boot) > 1) {
+    sd(model$att.avg.boot)
+  } else NA_real_
+  data.table(
+    Model = label, ATT = round(att, 4), SE = round(se, 4),
+    CI_lower = round(att - 1.96 * se, 4), CI_upper = round(att + 1.96 * se, 4),
+    p_value = round(2 * pnorm(-abs(att / se)), 4)
+  )
+}
+
+extract_did_att <- function(model, label) {
+  avg <- model$est.avg
+  data.table(
+    Model = label,
+    ATT = round(avg$ATT.avg, 4), SE = round(avg$S.E., 4),
+    CI_lower = round(avg$CI.lower, 4), CI_upper = round(avg$CI.upper, 4),
+    p_value = round(avg$p.value, 4)
+  )
+}
+
+for (fig_key in names(FIGURES)) {
+  fig <- FIGURES[[fig_key]]
+  message("\n--- ", fig$name, " (Antisemitism) ---")
+
+  results_list <- list()
+
+  # fect models
+  for (method in c("ife", "mc", "fe")) {
+    mp <- file.path(MODELS_DIR, paste0("fect_", method, "_antisem_", fig_key, ".rds"))
+    if (file.exists(mp)) {
+      m <- readRDS(mp)
+      label <- switch(method, ife="IFE", mc="Matrix Completion", fe="Two-Way FE")
+      results_list[[paste0("fect_", method)]] <- extract_att(m, label)
+      rm(m); gc()
+    }
+  }
+
+  # Modern DiD
+  for (method in did_methods) {
+    mp <- file.path(MODELS_DIR, paste0("did_", method, "_antisem_", fig_key, ".rds"))
+    if (file.exists(mp)) {
+      m <- readRDS(mp)
+      results_list[[paste0("did_", method)]] <- extract_did_att(m, did_labels[method])
+      rm(m); gc()
+    }
+  }
+
+  if (length(results_list) > 0) {
+    results <- rbindlist(results_list)
+    print(results)
+  } else {
+    message("  No models found.")
+  }
+}
+```

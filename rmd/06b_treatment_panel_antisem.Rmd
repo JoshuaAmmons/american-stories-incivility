@@ -1,0 +1,75 @@
+---
+title: "06b — Treatment Panels: Antisemitism Outcome (Multi-Figure)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+source("C:/Users/ammonsj/Ideas/R/build_antisem_panels.R")
+```
+
+## Build antisemitism treatment panels
+
+Panels are built by `R/build_antisem_panels.R`, which streams the RoBERTa-scored
+corpus **one year at a time**: each year's text file is read once and every
+political figure is flagged in that single pass, then the year's articles are
+aggregated to the newspaper × month level and only the small monthly aggregates
+are accumulated. This keeps peak memory at roughly one year of data (~7–8 GB)
+instead of materialising the full ~63 GB scored table — the previous inline
+version loaded everything and `clusterExport()`-ed it to 5 workers, which
+exceeded the machine's 128 GB and reliably OOM-crashed.
+
+The panel schema is unchanged, so steps 07c and 08b consume these files exactly
+as before. Building is resumable: any `did_panel_antisem_<figure>.parquet` that
+already exists is skipped (delete it to force a rebuild).
+
+```{r build-panels}
+roberta_dir <- ROBERTA_SCORED_DIR
+text_dir    <- file.path(DATA_PARQUET, "articles_antisem_scored")
+
+if (length(list.files(roberta_dir, pattern = "\\.parquet$")) == 0) {
+  stop("No RoBERTa-scored files found in ", roberta_dir, ". Run step 05c first.")
+}
+
+build_all_antisem_panels(
+  roberta_dir = roberta_dir,
+  text_dir    = text_dir,
+  figures     = FIGURES,
+  out_dir     = DATA_PANELS
+)
+```
+
+## Panel summary
+
+```{r summary}
+library(arrow)
+library(data.table)
+
+panel_files <- list.files(DATA_PANELS, pattern = "^did_panel_antisem_.*\\.parquet$",
+                          full.names = TRUE)
+message("Antisemitism panel files found: ", length(panel_files))
+
+for (pf in panel_files) {
+  fig_key <- gsub(".*did_panel_antisem_(.*)\\.parquet", "\\1", pf)
+  fig_name <- if (fig_key %in% names(FIGURES)) FIGURES[[fig_key]]$name else fig_key
+  p <- as.data.table(read_parquet(pf))
+
+  p[, ever_treated := as.integer(!is.na(treat_date))]
+
+  summary_by_group <- p[, .(
+    `N newspaper-months` = .N,
+    `N newspapers` = uniqueN(newspaper_name),
+    `Mean antisemitism (RoBERTa)` = round(mean(antisem_rate_roberta, na.rm = TRUE), 4),
+    `Mean antisemitism (lexicon)` = round(mean(antisem_rate_lexicon, na.rm = TRUE), 3),
+    `Mean figure count` = round(mean(figure_count), 2)
+  ), by = .(Group = fifelse(ever_treated == 1, "Treated", "Never Treated"))]
+
+  cat("\n--- ", fig_name, " ---\n")
+  print(summary_by_group)
+
+  rm(p)
+  gc()
+}
+```

@@ -103,10 +103,49 @@ message("DFM dimensions: ", nrow(dfmat), " x ", ncol(dfmat))
 # TF-IDF weighting
 dfmat_tfidf <- dfm_tfidf(dfmat)
 
+# ----- CRITICAL: Save IDF weights for scoring-time replay -----
+# At scoring time, we must apply the SAME IDF weights learned here,
+# not recompute them per-chunk (which would distort features).
+# quanteda's dfm_tfidf() defaults:
+#   scheme_tf = "count"  (raw term counts, unchanged)
+#   scheme_df = "inverse" (log10(N / df_t))
+#   base = 10
+# So: tfidf(t,d) = count(t,d) * log10(N / df_t)
+# We save the IDF vector to replay the exact same transformation.
+idf_weights <- log10(nrow(dfmat) / docfreq(dfmat))
+names(idf_weights) <- featnames(dfmat)
+message("IDF weights computed for ", length(idf_weights), " features",
+        " (log10 base, matching quanteda defaults)")
+
+# --- Verification: ensure manual IDF matches quanteda's output exactly ---
+# Spot-check on a random subset of 500 rows to avoid materializing
+# two full dense matrices (~80 GB for 500K x 10K each).
+n_check <- min(500L, nrow(dfmat))
+check_idx <- sample(nrow(dfmat), n_check)
+manual_tfidf_sub <- sweep(as.matrix(dfmat[check_idx, ]), 2, idf_weights, `*`)
+quanteda_tfidf_sub <- as.matrix(dfmat_tfidf[check_idx, ])
+idf_check <- all.equal(manual_tfidf_sub, quanteda_tfidf_sub, tolerance = 1e-10)
+if (!isTRUE(idf_check)) {
+  stop("IDF weight verification FAILED! Manual IDF does not match dfm_tfidf() output.\n",
+       "  Mismatch details: ", idf_check, "\n",
+       "  Check quanteda version and dfm_tfidf default parameters.")
+}
+message("IDF weight verification PASSED on ", n_check,
+        " random rows — manual weights match dfm_tfidf() exactly.")
+rm(manual_tfidf_sub, quanteda_tfidf_sub, idf_check, check_idx, n_check)
+
+# Free un-weighted DFM now — no longer needed after IDF computation
+# This releases ~500K x 10K sparse matrix BEFORE dense materialization
+rm(dfmat)
+gc()
+
 # Convert to matrix for SVD
 mat <- as.matrix(dfmat_tfidf)
 
 # SVD to 200 components (reduced from 300 for memory)
+# set.seed here because the earlier seed (line 40) was consumed by sampling;
+# prcomp_irlba uses random initialization internally
+set.seed(SEED)
 message("Running SVD...")
 n_components <- min(200, ncol(mat) - 1)
 svd_result <- prcomp_irlba(mat, n = n_components, center = TRUE, scale. = FALSE)
@@ -116,18 +155,19 @@ names(svd_df) <- paste0("svd_", seq_len(ncol(svd_df)))
 message("SVD components: ", ncol(svd_df))
 
 # Save SVD model info BEFORE cleanup so we can score new articles later
-# We need: rotation matrix, center vector, and the vocabulary
+# We need: rotation matrix, center vector, vocabulary, AND IDF weights
 svd_vocab <- featnames(dfmat_tfidf)
 saveRDS(list(
   center = svd_result$center,
   rotation = svd_result$rotation,
   vocab = svd_vocab,
-  n_components = n_components
+  n_components = n_components,
+  idf_weights = idf_weights  # <-- NEW: saved for scoring-time replay
 ), file.path(MODELS_DIR, "svd_model_info.rds"))
-message("Saved SVD model info for corpus scoring.")
+message("Saved SVD model info + IDF weights for corpus scoring.")
 
-# Clean up large objects
-rm(corp, toks, dfmat, dfmat_tfidf, mat, svd_result, svd_vocab)
+# Clean up large objects (dfmat already freed before dense materialization)
+rm(corp, toks, dfmat_tfidf, mat, svd_result, svd_vocab)
 gc()
 ```
 
@@ -135,20 +175,39 @@ gc()
 
 ```{r combine-features}
 # Metadata features
+# NOTE: Lexicon sub-scores (insult_score, dehumanize_score, etc.) are
+# EXCLUDED to avoid data leakage — the pseudo-labels are derived from
+# the aggregate uncivil_score, which is a function of these sub-scores.
+# Including them would let the RF memorize the label function rather than
+# learning genuine textual patterns from the SVD features.
+#
+# Guard: Some metadata columns may not exist in very early years (pre-1850s).
+# Create them with safe defaults if absent, so the code doesn't error.
+for (col in c("front_page", "headline_length", "n_words",
+              "has_byline", "ocr_quality", "page_num")) {
+  if (!col %in% names(dt)) {
+    dt[, (col) := 0L]
+    message("  NOTE: Column '", col, "' missing from data — created with default 0")
+  }
+}
+
 meta_features <- dt[, .(
   front_page,
   headline_length,
   n_words,
   has_byline,
   ocr_quality,
-  page_num,
-  # Subcategory scores as additional features
-  insult_score,
-  dehumanize_score,
-  violence_score,
-  conspiracy_score,
-  intolerance_score
+  page_num
 )]
+
+# Guard against NAs in metadata columns (common in historical data)
+meta_features[is.na(headline_length), headline_length := 0L]
+meta_features[is.na(has_byline), has_byline := 0L]
+meta_features[is.na(front_page), front_page := 0L]
+# Use 0 for missing ocr_quality to match scoring-time imputation
+meta_features[is.na(ocr_quality), ocr_quality := 0]
+meta_features[is.na(page_num), page_num := 0L]
+meta_features[is.na(n_words), n_words := 0L]
 
 # Combine
 feature_df <- cbind(
@@ -174,7 +233,7 @@ message("  Rows: ", nrow(feature_df))
 message("  Columns: ", ncol(feature_df))
 message("  SVD components: ", sum(grepl("^svd_", names(feature_df))))
 message("  Metadata features: front_page, headline_length, n_words, ",
-        "has_byline, ocr_quality, page_num + 5 sub-scores")
+        "has_byline, ocr_quality, page_num (sub-scores excluded to prevent leakage)")
 
 # Distribution of pseudo-labels
 q90 <- quantile(feature_df$uncivil_score, 0.90, na.rm = TRUE)

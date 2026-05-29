@@ -1,0 +1,201 @@
+---
+title: "04b — Sample Articles for LLM Labeling (Antisemitism)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+knitr::opts_knit$set(root.dir = "C:/Users/ammonsj/Ideas")
+source("C:/Users/ammonsj/Ideas/_config.R")
+```
+
+## Pass 1: Load only scores (lightweight)
+
+```{r load_scores}
+library(arrow)
+library(data.table)
+library(parallel)
+
+antisem_dir <- file.path(DATA_PARQUET, "articles_antisem_scored")
+antisem_files <- list.files(antisem_dir, pattern = "\\.parquet$", full.names = TRUE)
+message("Found ", length(antisem_files), " antisemitism-scored year files")
+
+# PASS 1: Read ONLY score + metadata columns in parallel (no article text!)
+N_READERS <- 5L
+message("Reading scores with ", N_READERS, " parallel workers...")
+
+cl <- makeCluster(N_READERS)
+score_chunks <- parLapplyLB(cl, antisem_files, function(f) {
+  library(arrow)
+  library(data.table)
+  as.data.table(read_parquet(f, col_select = c(
+    "article_id", "newspaper_name", "year",
+    "n_words", "ocr_quality", "antisem_score"
+  )))
+})
+stopCluster(cl)
+
+dt_scores <- rbindlist(score_chunks, fill = TRUE)
+rm(score_chunks); gc()
+
+message("Total articles: ", format(nrow(dt_scores), big.mark = ","))
+```
+
+## Filter for quality and length
+
+```{r filter}
+dt_eligible <- dt_scores[
+  !is.na(ocr_quality) & ocr_quality > 0.65 &
+  !is.na(n_words) & n_words >= 50
+]
+rm(dt_scores); gc()
+
+message("Eligible articles (OCR quality > 0.65, >= 50 words): ",
+        format(nrow(dt_eligible), big.mark = ","))
+message("  With any antisemitism score > 0: ",
+        format(sum(dt_eligible$antisem_score > 0, na.rm = TRUE), big.mark = ","))
+```
+
+## Stratified sample
+
+```{r sample}
+set.seed(SEED)
+
+TOTAL_SAMPLE <- 4000L
+
+# Stratify by antisemitism lexicon score
+nonzero <- dt_eligible[antisem_score > 0]
+zero <- dt_eligible[antisem_score == 0]
+
+message("Nonzero-scoring articles: ", format(nrow(nonzero), big.mark = ","))
+message("Zero-scoring articles: ", format(nrow(zero), big.mark = ","))
+
+# Score-based targets: 1000 high, 1000 medium, 2000 zero
+q75 <- quantile(nonzero$antisem_score, 0.75)
+high <- nonzero[antisem_score >= q75]
+medium <- nonzero[antisem_score < q75]
+
+n_high <- min(1000L, nrow(high))
+n_medium <- min(1000L, nrow(medium))
+n_zero <- TOTAL_SAMPLE - n_high - n_medium
+
+message("\nTarget sample: ", TOTAL_SAMPLE)
+message("  High (score >= p75): ", n_high)
+message("  Medium (score > 0 & < p75): ", n_medium)
+message("  Zero (score = 0): ", n_zero)
+
+# Within each stratum, stratify by era to ensure temporal coverage
+era_breaks <- c(-Inf, 1830, 1860, 1900, 1930, Inf)
+era_labels <- c("pre1830", "1830_1860", "1860_1900", "1900_1930", "1930_1960")
+
+sample_stratum <- function(stratum_dt, n_target, stratum_name) {
+  stratum_dt[, era := cut(year, breaks = era_breaks, labels = era_labels, right = FALSE)]
+
+  era_counts <- stratum_dt[, .N, by = era]
+  era_counts[, target := pmax(
+    5L,
+    as.integer(round(n_target * N / sum(N)))
+  )]
+  era_counts[, target := pmin(target, N)]
+  overshoot <- sum(era_counts$target) - n_target
+  if (overshoot > 0) {
+    big_eras <- era_counts[order(-target)]
+    for (i in seq_len(nrow(big_eras))) {
+      trim <- min(overshoot, big_eras$target[i] - 5L)
+      if (trim > 0) {
+        era_counts[era == big_eras$era[i], target := target - trim]
+        overshoot <- overshoot - trim
+      }
+      if (overshoot <= 0) break
+    }
+  }
+
+  samples <- list()
+  for (i in seq_len(nrow(era_counts))) {
+    e <- era_counts$era[i]
+    n <- era_counts$target[i]
+    pool <- stratum_dt[era == e]
+    if (nrow(pool) > 0 && n > 0) {
+      samples[[length(samples) + 1]] <- pool[sample(.N, min(n, .N))]
+    }
+  }
+
+  result <- rbindlist(samples, fill = TRUE)
+  result[, stratum := stratum_name]
+  message("  ", stratum_name, ": sampled ", nrow(result), " across ",
+          length(unique(result$era)), " eras")
+  result
+}
+
+sample_high <- sample_stratum(high, n_high, "high")
+sample_medium <- sample_stratum(medium, n_medium, "medium")
+sample_zero <- sample_stratum(zero, n_zero, "zero")
+
+# Combine — these are just IDs + scores, no article text yet
+sample_ids <- rbindlist(list(sample_high, sample_medium, sample_zero), fill = TRUE)
+rm(dt_eligible, nonzero, zero, high, medium, sample_high, sample_medium, sample_zero); gc()
+
+message("\nSampled ", nrow(sample_ids), " article IDs")
+message("\nBy stratum:")
+print(sample_ids[, .N, by = stratum])
+message("\nBy era:")
+print(sample_ids[, .N, by = era][order(era)])
+```
+
+## Pass 2: Fetch full text for sampled articles only
+
+```{r fetch_text}
+# PASS 2: Read article text ONLY for the 4,000 sampled IDs, in parallel
+sample_ids[, src_year := as.character(year)]
+years_needed <- unique(sample_ids$src_year)
+message("Fetching article text from ", length(years_needed), " year files with ",
+        N_READERS, " parallel workers...")
+
+# Build lookup: which article_ids per year
+ids_by_year <- split(sample_ids$article_id, sample_ids$src_year)
+
+cl <- makeCluster(N_READERS)
+text_list <- parLapplyLB(cl, years_needed, function(yr, antisem_dir, ids_by_year) {
+  library(arrow)
+  library(data.table)
+  f <- file.path(antisem_dir, paste0("antisem_scored_", yr, ".parquet"))
+  if (!file.exists(f)) return(NULL)
+  ids_wanted <- ids_by_year[[yr]]
+  dt <- as.data.table(read_parquet(f, col_select = c("article_id", "article")))
+  dt[article_id %in% ids_wanted]
+}, antisem_dir = antisem_dir, ids_by_year = ids_by_year)
+stopCluster(cl)
+
+dt_text <- rbindlist(text_list, fill = TRUE)
+rm(text_list); gc()
+
+message("Fetched text for ", nrow(dt_text), " articles")
+
+# Merge text back into sample
+sample_4k <- merge(sample_ids, dt_text, by = "article_id", all.x = TRUE)
+sample_4k[, src_year := NULL]
+rm(sample_ids, dt_text); gc()
+
+# Verify we got text for all
+n_missing <- sum(is.na(sample_4k$article) | nchar(sample_4k$article) < 100)
+message("Articles with missing/short text: ", n_missing)
+
+message("\nFinal sample: ", nrow(sample_4k), " articles")
+message("\nBy decade:")
+print(sample_4k[, .N, by = .(decade = floor(year / 10) * 10)][order(decade)])
+```
+
+## Save sample
+
+```{r save}
+outpath <- file.path(DATA_PANELS, "antisem_labeling_sample.parquet")
+write_parquet(sample_4k, outpath)
+message("Saved labeling sample: ", outpath)
+
+csv_path <- file.path(DATA_PANELS, "antisem_labeling_sample.csv")
+write.csv(sample_4k[, .(article_id, newspaper_name, year, stratum, era,
+                          antisem_score, n_words,
+                          article_preview = substr(article, 1, 200))],
+          csv_path, row.names = FALSE)
+message("Saved CSV preview: ", csv_path)
+```

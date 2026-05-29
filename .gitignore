@@ -25,3 +25,46 @@ Thumbs.db
 
 # HuggingFace cache
 .cache/
+
+# Output / generated artifacts (rebuildable, large)
+output/
+output_html/
+figures/
+tables/
+Rplots.pdf
+*.html
+
+# Scratch / debug / test scripts (kept locally for diagnostics)
+R/_*.R
+R/_*.ps1
+# ...but keep the intentional auto-run infrastructure
+!R/_downstream_watchdog.ps1
+!R/_launch_gpu_workers.ps1
+!R/_test_06b.R
+
+# Root-level scratch analysis scripts
+/check_*.R
+/check_*.py
+/persistence_test.R
+/mechanism_tests.R
+/inspect_*.R
+/interaction_check.R
+/patch_locations.R
+/regen_*.R
+/rerun_*.R
+/run_loo_*.R
+/size_tercile_*.R
+/reproduce_all.R
+/estimate_dchm_switcher.R
+/generate_*.R
+
+# Local notes & one-offs
+PROJECT_PLAN.txt
+roberta_scoring_estimate.txt
+hasnas_text.txt
+nul
+
+# Local working material
+Literature/
+Newspaper examples/
+.claude/
